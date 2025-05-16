@@ -1,0 +1,153 @@
+import os
+import re
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PDFPlumberLoader
+from langchain_community.vectorstores import Chroma
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain.tools import Tool
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain.tools.tavily_search import TavilySearchResults
+from typing import List, Dict
+
+llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+embeddings = OpenAIEmbeddings()
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+
+# 1. PDF 문서 로딩 및 metadata 삽입
+def load_docs_with_metadata(path: str, crop: str) -> List:
+    docs = PDFPlumberLoader(path).load()
+    for i, doc in enumerate(docs):
+        doc.metadata["작물"] = crop
+        doc.metadata["출처"] = os.path.basename(path)
+        doc.metadata["페이지"] = i
+
+        # 병해충명 추출: 예) 1. 탄저병
+        match = re.search(r"\d+\.\s*([가-힣]+병|응애|진딧물)", doc.page_content)
+        if match:
+            doc.metadata["병해충명"] = match.group(1)
+    return docs
+
+# 2. 사용자 입력에서 필터 조건 추출
+def extract_filter_from_query(query: str) -> Dict:
+    crop_match = re.search(r"(딸기|토마토)", query)
+    pest_match = re.search(r"([가-힣]+병|응애|진딧물)", query)
+
+    filter_dict = {}
+    if crop_match:
+        filter_dict["작물"] = crop_match.group(1)
+    if pest_match:
+        filter_dict["병해충명"] = pest_match.group(1)
+    return filter_dict
+
+# 3. 웹 검색 툴
+def web_search_with_notice(query: str) -> str:
+    results = TavilySearchResults().invoke(query)
+    return str(results) + "\n\n🔎 웹 검색 결과를 기반으로 제공된 정보입니다."
+
+web_search_tool = Tool(
+    name="web_search_tool",
+    func=web_search_with_notice,
+    description=(
+        "딸기 또는 토마토에 대한 병해충 정보 또는 농약/비료 정보가 문서에 없을 경우, 웹에서 검색을 수행합니다. "
+        "웹에서 가져온 최신 정보가 필요할 때 사용하세요. "
+        "사용 시 '🔎 웹 검색 결과를 기반으로 제공된 정보입니다.' 문구가 반드시 출력되어야 합니다."
+    )
+)
+
+# 4. Chroma 벡터 DB 처리
+def get_vectorstore(pdf_path, index_path, crop):
+    if os.path.exists(index_path):
+        return Chroma(persist_directory=index_path, embedding_function=embeddings)
+    docs = load_docs_with_metadata(pdf_path, crop)
+    split_docs = text_splitter.split_documents(docs)
+    vs = Chroma.from_documents(split_docs, embeddings, persist_directory=index_path)
+    vs.persist()
+    return vs
+
+# 경로
+strawberry_path = "data/딸기 병해충 및 비료.pdf"
+tomato_path = "data/토마토 병해충 및 비료.pdf"
+strawberry_index_path = "chroma_index/strawberry"
+tomato_index_path = "chroma_index/tomato"
+
+strawberry_vectorstore = get_vectorstore(strawberry_path, strawberry_index_path, "딸기")
+tomato_vectorstore = get_vectorstore(tomato_path, tomato_index_path, "토마토")
+
+# 5. 필터 기반 retriever tool 래핑
+def make_filtered_tool(name, vectorstore, crop_name):
+    retriever = vectorstore.as_retriever()
+
+    def _filtered_search(query: str) -> str:
+        filters = extract_filter_from_query(query)
+        return retriever.invoke(query, filter=filters)
+
+    return Tool(
+        name=name,
+        func=_filtered_search,
+        description=(
+            f"{crop_name}에 발생하는 병해충을 진단하고, 해당 병해충에 효과적인 농약 이름과 사용 시기를 추천합니다. "
+            "또한 생육 단계에 따라 적절한 비료/퇴비 정보도 제공합니다."
+        )
+    )
+
+strawberry_retriever_tool = make_filtered_tool("strawberry", strawberry_vectorstore, "딸기")
+tomato_retriever_tool = make_filtered_tool("tomato", tomato_vectorstore, "토마토")
+
+tools = [strawberry_retriever_tool, tomato_retriever_tool, web_search_tool]
+
+# 프롬프트 정의
+prompt = ChatPromptTemplate.from_messages([
+    ("system", 
+ "당신은 작물 병해충 진단, 농약 및 비료(퇴비) 추천 전문가입니다. 사용자의 질문 의도를 파악해 아래 규칙에 따라 관련된 항목만 출력하세요."
+
+"질문 범주:"
+
+"병해충에 대한 질문일 경우:"
+
+"✅ 병해충 이름"
+"🧴 추천 농약"
+"💊 농약 사용 방법"
+"🕓 농약 사용 시기"
+"🧰 방제 방법"
+
+"농약에 대한 질문일 경우:"
+"🧴 추천 농약"
+"💊 농약 사용 방법"
+"🕓 농약 사용 시기"
+
+"비료나 퇴비에 대한 질문일 경우: 필요한 영양소와 비료 사용 방법 및 시기, 용량만 출력: 모든 정보를 제공"
+
+"🌿 필요한 영양소"
+"📆 비료 사용 시기"
+"🧪 비료 사용 방법"
+"⚖️ 비료 사용 용량"
+
+"도구 사용 지침:"
+
+"관련 정보는 strawberry_retriever_tool 또는 tomato_retriever_tool을 통해 검색하세요."
+"정보가 부족할 경우 web_search_tool로 웹 검색을 수행하세요."
+"웹 검색 툴을 사용했다면 결과 하단에 '🔎 웹 검색 결과를 기반으로 제공된 정보입니다.'를 추가하세요."
+
+"참고:"
+
+"상세 사용법은 농약/비료 라벨 또는 농촌진흥청 자료를 참고하세요."
+
+),
+
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad")
+])
+
+# Agent 실행기 구성
+agent = create_tool_calling_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False)
+
+# 예시 실행
+response = agent_executor.invoke({
+    "input": "딸기 잿빛곰팡이병에 대한 정보를 알려줘"
+})
+
+print(response["output"].strip()) 
+
+
