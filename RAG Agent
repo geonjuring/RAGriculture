@@ -1,0 +1,249 @@
+import os
+import re
+import warnings
+from typing import List, Dict
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PDFPlumberLoader,PyMuPDFLoader
+from langchain_teddynote.document_loaders import HWPLoader
+from langchain_community.vectorstores import Chroma
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain.tools import Tool
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_community.tools.tavily_search.tool import TavilySearchResults
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CohereRerank
+
+warnings.filterwarnings("ignore")
+
+# === 기본 설정 ===
+llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+embeddings = OpenAIEmbeddings()
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+
+# === 필터 추출 함수 ===
+def extract_filter_from_query(query: str) -> Dict:
+    crop_match = re.search(r"(딸기|토마토|망고)", query)
+    pest_match = re.search(r"([가-힣]+병|응애|진딧물)", query)
+    fertilizer_match = re.search(r"(비료|퇴비|질소|인산|칼륨)", query)
+    cultivation_match = re.search(r"(재배|파종|정식|관리|관수|시비)", query)
+
+    filters = {}
+    if crop_match:
+        filters["작물"] = crop_match.group(1)
+
+    if pest_match:
+        filters["병해충명"] = pest_match.group(1)
+
+    if fertilizer_match:
+        filters["질문유형"] = "비료"
+    elif cultivation_match:
+        filters["질문유형"] = "재배"
+    
+
+    return filters
+
+def infer_task_type(text: str) -> str:
+    if re.search(r"(병|해충|응애|곰팡이|진딧물)", text):
+        return "병해충"
+    elif re.search(r"(질소|인산|칼륨|퇴비|비료)", text):
+        return "비료"
+    elif re.search(r"(정식|파종|관수|시비|수확|재배|유인|온도|토양)", text):
+        return "재배"
+    else:
+        return "일반"
+
+# === 문서 로더 ===
+def load_docs_with_metadata(paths: List[str], crop: str) -> List:
+    all_docs = []
+
+    for path in paths:
+        if path.lower().endswith(".pdf"):
+            loader = PyMuPDFLoader(path)
+        elif path.lower().endswith(".hwp"):
+            loader = HWPLoader(path)
+        else:
+            raise ValueError(f"지원하지 않는 파일 형식입니다: {path}")
+
+        docs = loader.load()
+        for i, doc in enumerate(docs):
+            doc.metadata.update({
+                "작물": crop,
+                "출처": os.path.basename(path),
+                "페이지": i
+            })
+
+            task_type = infer_task_type(doc.page_content)
+            doc.metadata["질문유형"] = task_type
+
+            if task_type == "병해충":
+                match = re.search(r"\d+\.\s*([가-힣]+병|응애|진딧물)", doc.page_content)
+                if match:
+                    doc.metadata["병해충명"] = ",".join(sorted(set(match)))
+
+            if task_type == "비료":
+                fert_matches = re.findall(r"(질소|인산|칼륨|퇴비|비료)", doc.page_content)
+                if fert_matches:
+                    doc.metadata["비료성분"] = ",".join(sorted(set(fert_matches)))
+
+            if task_type == "재배":
+                cultivation_matches = re.findall(r"(정식|파종|관수|시비|수확|유인|온도|토양)", doc.page_content)
+                if cultivation_matches:
+                    doc.metadata["재배항목"] = ",".join(sorted(set(cultivation_matches)))
+
+        all_docs.extend(docs)
+
+    return all_docs
+
+
+# 3. 웹 검색 툴
+def web_search_with_notice(query: str) -> str:
+    results = TavilySearchResults().invoke(query)
+    return str(results) + "\n\n🔎 웹 검색 결과를 기반으로 제공된 정보입니다."
+
+web_search_tool = Tool(
+    name="web_search_tool",
+    func=web_search_with_notice,
+    description=(
+       "딸기, 토마토, 망고에 대한 작물 재배법, 병해충, 농약 및 비료(퇴비) 관련 정보가 문서에 없거나 부족할 경우, 웹에서 검색을 수행합니다. "
+    "최신 정보가 필요한 경우에도 사용하세요. "
+    "웹 검색 결과를 활용한 응답일 경우, 반드시 '🔎 웹 검색 결과를 기반으로 제공된 정보입니다.' 문구를 출력해야 합니다."
+    )
+)
+
+# 4. Chroma 벡터 DB 처리
+def get_vectorstore(pdf_path, index_path, crop):
+    if os.path.exists(index_path):
+        return Chroma(persist_directory=index_path, embedding_function=embeddings)
+    docs = load_docs_with_metadata(pdf_path, crop)
+    split_docs = text_splitter.split_documents(docs)
+    vs = Chroma.from_documents(split_docs, embeddings, persist_directory=index_path)
+    vs.persist()
+    return vs
+
+# 경로
+strawberry_path = ["data/딸기 병해충 및 비료.pdf",
+                   "data/딸기(촉성재배) 농작업일정.hwp",
+                   "data/과즙이풍부한왕딸기킹스베리재배매뉴얼.pdf"]
+tomato_path = ["data/토마토 병해충 및 비료.pdf",
+               "data/토마토,방울토마토 농작업일정.hwp",
+               "data/과채류(토마토).pdf",
+               "data/29 토마토_저화질_단면.pdf"]
+mango_path = ["data/아열대과수(망고).pdf",
+              "data/2023농업기술길잡이_망고_단면.pdf"]
+
+strawberry_index_path = "chroma_index/strawberry"
+tomato_index_path = "chroma_index/tomato"
+mango_index_path = "chroma_index/mango"
+
+strawberry_vectorstore = get_vectorstore(strawberry_path, strawberry_index_path, "딸기")
+tomato_vectorstore = get_vectorstore(tomato_path, tomato_index_path, "토마토")
+mango_vectorstore = get_vectorstore(mango_path, mango_index_path, "망고")
+
+# 5. 필터 기반 retriever tool 래핑
+def make_filtered_tool(name, vectorstore, crop_name):
+    # 1. 기본 Retriever
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})  # 후보 문서 충분히 확보
+
+    # 2. Cohere Reranker 설정
+    reranker = CohereRerank(
+    cohere_api_key=os.getenv("COHERE_API_KEY"),
+    top_n=5,
+    model="rerank-multilingual-v3.0"  # ✅ 한국어 지원 모델
+)
+
+    # 3. Reranker로 압축된 Retriever 구성
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=reranker,
+        base_retriever=base_retriever
+    )
+
+    # 4. 필터 기반 검색 함수 정의
+    def _filtered_search(query: str) -> str:
+        filters = extract_filter_from_query(query)
+        return compression_retriever.invoke(query, filter=filters)  # 필터 적용
+
+    return Tool(
+        name=name,
+        func=_filtered_search,
+        description=(
+            f"{crop_name}에 대한 병해충 진단, 효과적인 농약 및 비료(퇴비) 추천, 그리고 작물 생육 단계별 재배 방법 정보를 제공합니다. "
+            "질문에 따라 병해충명, 농약 사용 시기와 방법, 비료 성분과 용량, 파종부터 수확까지의 재배 일정 및 관리 방법을 포함해 안내합니다."
+        )
+    )
+
+strawberry_retriever_tool = make_filtered_tool("strawberry", strawberry_vectorstore, "딸기")
+tomato_retriever_tool = make_filtered_tool("tomato", tomato_vectorstore, "토마토")
+mango_retriever_tool = make_filtered_tool("mango", mango_vectorstore, "망고")
+
+tools = [strawberry_retriever_tool, tomato_retriever_tool, mango_retriever_tool, web_search_tool]
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system",
+"""
+당신은 작물 재배, 병해충 진단, 농약 및 비료(퇴비) 추천까지 전반적인 농업 정보를 제공하는 전문가입니다.
+사용자의 질문 의도를 파악하여 아래 규칙에 따라 관련 정보를 정확하고 실용적으로 출력하세요.
+
+---
+
+❓ 질문 범주 및 출력 형식:
+
+📌 병해충에 대한 질문일 경우:
+✅ 병해충 이름  
+🧴 추천 농약  
+💊 농약 사용 방법  
+🕓 농약 사용 시기  
+🧰 방제 방법  
+
+📌 농약에 대한 질문일 경우:
+🧴 추천 농약  
+💊 농약 사용 방법  
+🕓 농약 사용 시기  
+
+📌 비료나 퇴비에 대한 질문일 경우:
+🌿 필요한 영양소  
+📆 비료 사용 시기  
+🧪 비료 사용 방법  
+⚖️ 비료 사용 용량  
+
+📌 작물 재배법이 궁금한 경우:
+🌱 재배 시기  
+🌍 재배 환경 조건 (기후, 토양 등)  
+📏 재식 간격 및 정식 방법  
+💧 관수 방법  
+🧪 시비(비료) 방법  
+✂️ 생육 관리 (가지치기, 유인 등)  
+🌾 수확 시기 및 방법  
+
+---
+
+🛠️ 도구 사용 지침:
+
+- 관련 정보는 crop_retriever_tool을 통해 검색하세요. (ex: strawberry_retriever_tool, mango_retriever_tool 등)
+- 문서에 정보가 부족하거나 최신 정보가 필요한 경우 web_search_tool을 통해 보완하세요.
+- 웹 검색 툴 사용 시, 결과 하단에 반드시 아래 문구를 추가하세요:  
+  🔎 웹 검색 결과를 기반으로 제공된 정보입니다.
+
+💡 초보 농업인도 이해할 수 있도록 간결하고 쉬운 언어로 설명하세요.
+
+📚 참고:  
+상세 사용법은 농약·비료 라벨 또는 농촌진흥청 자료를 참고하세요.
+"""
+    ),
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad")
+])
+
+
+# Agent 실행기 구성
+agent = create_tool_calling_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False)
+
+# 예시 실행
+response = agent_executor.invoke({
+    "input": "망고 재배방법을 알려줘"
+})
+
+print(response["output"].strip())
+
