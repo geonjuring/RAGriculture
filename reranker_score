@@ -1,0 +1,44 @@
+import cohere
+
+co = cohere.Client(os.getenv("COHERE_API_KEY"))  # 또는 직접 키 입력
+
+query = "망고 재배방법을 알려줘"
+retrieved_docs = mango_vectorstore.as_retriever(search_kwargs={"k": 10}).invoke(query)
+
+# 문서 텍스트 리스트 생성
+docs_texts = [doc.page_content for doc in retrieved_docs]
+
+# Cohere Rerank API 호출
+response = co.rerank(
+    model="rerank-multilingual-v3.0",
+    query=query,
+    documents=docs_texts,
+    top_n=5,
+)
+
+# 출력
+print("\n📌 [Cohere 직접 호출한 Reranker 결과 Top 5]")
+for i, r in enumerate(response.results):
+    doc = retrieved_docs[r.index]  # 원래 문서와 매핑
+    print(f"\n[{i+1}위] 점수: {r.relevance_score}")
+    print(f"문서 출처: {doc.metadata.get('출처')}, 페이지: {doc.metadata.get('페이지')}")
+    print(doc.page_content[:500])
+    print("-" * 80)
+
+# csv 저장
+import pandas as pd
+
+data = []
+for i, r in enumerate(response.results):
+    doc = retrieved_docs[r.index]
+    data.append({
+        "랭킹": i+1,
+        "점수": r.relevance_score,
+        "출처": doc.metadata.get("출처"),
+        "페이지": doc.metadata.get("페이지"),
+        "내용요약": doc.page_content[:300]
+    })
+
+df = pd.DataFrame(data)
+df.to_csv("reranker_eval_result.csv", index=False)
+print("✅ 평가 결과가 CSV로 저장되었습니다.")
