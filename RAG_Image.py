@@ -44,6 +44,12 @@ file_path = [r"Data/hwp/딸기(촉성재배) 농작업일정.hwp",
              r"Data/pdf/겨울철 주요 병해충 관리기술.pdf",
              r"Data/pdf/여름병충해발생대비,딸기모종관리기술.pdf",
              r"Data/pdf/토마토 농약.pdf",
+             r"Data/pdf/딸기 재배 기술 정론(최신 교정).pdf",
+             r"Data/pdf/딸기 재배 기술 총람 (최신 교정).pdf",
+             r"Data/pdf/딸기 재배 일정 통일 및 상세화.pdf",
+             r"Data/pdf/토마토 반촉성재배 기술 정론 (교정).pdf",
+             r"Data/pdf/토마토 반촉성재배 상세 일정 생성.pdf",
+             r"Data/pdf/토마토 상업 재배 기술 총람 (교정).pdf",
              ]
 
 def load_docs(paths: List[str]) -> List:
@@ -407,7 +413,7 @@ def some_keyword_matching(doc, question):
 
 # 문서 검색 노드
 def retrieve(state):
-    print("==== [RETRIEVE] ====")
+    # print("==== [RETRIEVE] ====")
     question = state["question"]
     image_result = state.get("image_result", "")
 
@@ -419,8 +425,8 @@ def retrieve(state):
 
     documents = [doc for doc in file if some_keyword_matching(doc, enhanced_question)]
 
-    print(f"검색된 문서 수: {len(documents)}")
-    print(f"질문: {enhanced_question}")
+    # print(f"검색된 문서 수: {len(documents)}")
+    # print(f"질문: {enhanced_question}")
 
     return {"documents": documents, "question": enhanced_question}
 
@@ -428,7 +434,7 @@ def retrieve(state):
 
 # 답변 생성 노드
 def generate(state):
-    print("==== [GENERATE] ====")
+    # print("==== [GENERATE] ====")
     # 질문과 문서 검색 결과 가져오기
     question = state["question"]
     documents = state["documents"]
@@ -448,7 +454,7 @@ def generate(state):
 
 # 문서 관련성 평가 노드
 def grade_documents(state):
-    print("==== [CHECK DOCUMENT RELEVANCE TO QUESTION] ====")
+    # print("==== [CHECK DOCUMENT RELEVANCE TO QUESTION] ====")
     # 질문과 문서 검색 결과 가져오기
     question = state["question"]
     documents = state["documents"]
@@ -462,19 +468,19 @@ def grade_documents(state):
         )
         grade = score.binary_score
         if grade == "yes":
-            print("---GRADE: DOCUMENT RELEVANT---")
+            # print("---GRADE: DOCUMENT RELEVANT---")
             # 관련성이 있는 문서 추가
             filtered_docs.append(d)
         else:
             # 관련성이 없는 문서는 건너뛰기
-            print("---GRADE: DOCUMENT NOT RELEVANT---")
+            # print("---GRADE: DOCUMENT NOT RELEVANT---")
             continue
     return {"documents": filtered_docs, "question": question}
 
 
 # 질문 재작성 노드
 def transform_query(state):
-    print("==== [TRANSFORM QUERY] ====")
+    # print("==== [TRANSFORM QUERY] ====")
     # 질문과 문서 검색 결과 가져오기
     question = state["question"]
     documents = state["documents"]
@@ -486,7 +492,7 @@ def transform_query(state):
 
 # 웹 검색 노드
 def web_search(state):
-    print("==== [WEB SEARCH] ====")
+    # print("==== [WEB SEARCH] ====")
     # 질문과 문서 검색 결과 가져오기
     question = state["question"]
     image_result = state.get("image_result", "")
@@ -511,7 +517,7 @@ def web_search(state):
 # 이미지 분석 노드
 def image_analysis(state):
     """모델로 이미지 분석"""
-    print("==== [IMAGE ANALYSIS] ====")
+    # print("==== [IMAGE ANALYSIS] ====")
 
     question = state["question"]
     image_data = state["image"]
@@ -539,7 +545,7 @@ def image_analysis(state):
 
 # 질문 라우팅 노드
 def route_question(state):
-    print("==== [ROUTE QUESTION] ====")
+    # print("==== [ROUTE QUESTION] ====")
     # 질문 가져오기
     question = state["question"]
     image = state["image"]
@@ -554,15 +560,15 @@ def route_question(state):
 
 
     if source.datasource == "web_search":
-        print("==== [ROUTE QUESTION TO WEB SEARCH] ====")
+        # print("==== [ROUTE QUESTION TO WEB SEARCH] ====")
         return "web_search"
     elif source.datasource == "vectorstore":
-        print("==== [ROUTE QUESTION TO VECTORSTORE] ====")
+        # print("==== [ROUTE QUESTION TO VECTORSTORE] ====")
         return "vectorstore"
 
 
 def image_route_question(state):
-    print("==== [IMAGE ROUTE QUESTION] ====")
+    # print("==== [IMAGE ROUTE QUESTION] ====")
      # 질문 가져오기
     question = state["question"]
     # 이미지 분석 결과 가져오기
@@ -573,35 +579,33 @@ def image_route_question(state):
     source = image_route_router.invoke({"question": question, "image_result": image_result})
 
     if source.datasource == "web_search":
-        print("==== [ROUTE QUESTION TO WEB SEARCH] ====")
+        # print("==== [ROUTE QUESTION TO WEB SEARCH] ====")
         return "web_search"
     elif source.datasource == "vectorstore":
-        print("==== [ROUTE QUESTION TO VECTORSTORE] ====")
+        # print("==== [ROUTE QUESTION TO VECTORSTORE] ====")
         return "vectorstore"
 
 
 
 # 문서 관련성 평가 노드
 def decide_to_generate(state):
-    print("==== [DECISION TO GENERATE] ====")
+    # print("==== [DECISION TO GENERATE] ====")
     # 질문과 문서 검색 결과 가져오기
     question = state["question"]
     filtered_documents = state["documents"]
 
     if not filtered_documents:
         # 모든 문서가 관련성 없는 경우 질문 재작성
-        print(
-            "==== [DECISION: ALL DOCUMENTS ARE NOT RELEVANT TO QUESTION, TRANSFORM QUERY] ===="
-        )
+        # print("==== [DECISION: ALL DOCUMENTS ARE NOT RELEVANT TO QUESTION, TRANSFORM QUERY] ====")
         return "transform_query"
     else:
         # 관련성 있는 문서가 있는 경우 답변 생성
-        print("==== [DECISION: GENERATE] ====")
+        # print("==== [DECISION: GENERATE] ====")
         return "generate"
 
 
 def hallucination_check(state):
-    print("==== [CHECK HALLUCINATIONS] ====")
+    # print("==== [CHECK HALLUCINATIONS] ====")
     # 질문과 문서 검색 결과 가져오기
     question = state["question"]
     documents = state["documents"]
@@ -615,22 +619,22 @@ def hallucination_check(state):
 
     # Hallucination 여부 확인
     if grade == "yes":
-        print("==== [DECISION: GENERATION IS GROUNDED IN DOCUMENTS] ====")
+        # print("==== [DECISION: GENERATION IS GROUNDED IN DOCUMENTS] ====")
 
         # 답변의 관련성(Relevance) 평가
-        print("==== [GRADE GENERATED ANSWER vs QUESTION] ====")
+        # print("==== [GRADE GENERATED ANSWER vs QUESTION] ====")
         score = answer_grader.invoke({"question": question, "generation": generation})
         grade = score.binary_score
 
         # 관련성 평가 결과에 따른 처리
         if grade == "yes":
-            print("==== [DECISION: GENERATED ANSWER ADDRESSES QUESTION] ====")
+            # print("==== [DECISION: GENERATED ANSWER ADDRESSES QUESTION] ====")
             return "relevant"
         else:
-            print("==== [DECISION: GENERATED ANSWER DOES NOT ADDRESS QUESTION] ====")
+            # print("==== [DECISION: GENERATED ANSWER DOES NOT ADDRESS QUESTION] ====")
             return "not relevant"
     else:
-        print("==== [DECISION: GENERATION IS NOT GROUNDED IN DOCUMENTS, RE-TRY] ====")
+        # print("==== [DECISION: GENERATION IS NOT GROUNDED IN DOCUMENTS, RE-TRY] ====")
         return "hallucination"
 
 
@@ -707,7 +711,7 @@ config = RunnableConfig(recursion_limit=7, configurable={"thread_id": uuid.uuid4
 # 질문 입력
 inputs = {
     "question": "작물에 병이 생겼는데 처방법을 알려줘",
-    "image": "strawberry_data/Strawberry Disease Data/test/images/angular_leafspot360.jpg",
+    "image": "strawberry_data/Strawberry Disease Data/test/images/gray_mold399.jpg",
 }
 
 # 그래프 실행
