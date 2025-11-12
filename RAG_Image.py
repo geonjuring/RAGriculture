@@ -78,12 +78,12 @@ MODEL_NAME = "gpt-4o-mini"
 
 
 
-extended_model = AutoModelForImageClassification.from_pretrained("./ML_Model")
-extended_processor = AutoImageProcessor.from_pretrained("./ML_Model")
+extended_model = AutoModelForImageClassification.from_pretrained("./plant_disease_model")
+extended_processor = AutoImageProcessor.from_pretrained("./plant_disease_model")
     
     # 클래스 매핑 로드 (class_mapping.txt에서)
 all_classes = {}
-with open("./ML_Model/class_mapping.txt", "r", encoding="utf-8") as f:
+with open("./plant_disease_model/class_mapping.txt", "r", encoding="utf-8") as f:
     lines = f.readlines()
     
     for line in lines:
