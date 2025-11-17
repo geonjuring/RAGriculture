@@ -75,7 +75,8 @@ def initialize_rag_system():
         question_validator=prompts.get("question_validator"),  # 프롬프트 전달
         web_search_tool=web_search_tool,  # 웹 검색 도구 전달
         rag_metrics=rag_metrics,  # RAG 메트릭스 전달
-        image_route_router=prompts.get("image_route_router")  # 이미지 라우팅 라우터 전달
+        image_route_router=prompts.get("image_route_router"),  # 이미지 라우팅 라우터 전달
+        rag_prompt=prompts.get("rag_prompt"),
     )
     
     # 9. 워크플로우 구성

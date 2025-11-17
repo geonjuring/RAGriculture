@@ -4,6 +4,7 @@ LLM 프롬프트 초기화
 """
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain_core.output_parsers import StrOutputParser
 from .models import RouteQuery, QuestionValidity
 from .config import MODEL_NAME
 
@@ -288,6 +289,10 @@ def setup_llm_and_prompts(llm=None):
 위 정보를 바탕으로 질문에 대한 정확하고 전문적인 답변을 제공해주세요.
         """),
     ])
+
+
+
+
     
     # 평가용 프롬프트들
     grade_documents_prompt = ChatPromptTemplate.from_messages([
@@ -351,6 +356,7 @@ Otherwise, use web-search.""",),
     hallucination_grader = hallucination_grader_prompt | llm.with_structured_output(GradeHallucinations)
     answer_grader = answer_grader_prompt | llm.with_structured_output(GradeAnswer)
     image_route_router = image_route_prompt | llm.with_structured_output(ImageRouteQuery)
+    rag_chain = rag_prompt | llm | StrOutputParser()
 
     return {
         "llm": llm,
@@ -366,4 +372,5 @@ Otherwise, use web-search.""",),
         "answer_grader": answer_grader,
         # 이미지 분석 체인
         "image_route_router": image_route_router,
+        "rag_chain": rag_chain,
     }
