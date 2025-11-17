@@ -10,6 +10,9 @@ def get_current_question(state: Dict[str, Any]) -> str:
     """현재 처리 중인 질문을 가져오는 함수"""
     return state.get("current_question", state.get("question", ""))
 
+def get_current_image(state: Dict[str, Any]) -> str:
+    return state.get("current_image", state.get("image", ""))
+    
 
 def preserve_state_fields(state: Dict[str, Any], result: Dict[str, Any], exclude_fields: List[str] = None) -> Dict[str, Any]:
     """상태 필드를 보존하면서 새로운 결과를 추가하는 함수"""
@@ -30,4 +33,5 @@ def format_docs(docs: List[Document]) -> str:
         f"문서 {i+1}: {doc.page_content}\n출처: {doc.metadata.get('source', 'Unknown')}"
         for i, doc in enumerate(docs)
     ])
+
 

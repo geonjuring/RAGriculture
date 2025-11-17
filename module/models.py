@@ -2,7 +2,7 @@
 데이터 모델 정의 모듈
 Pydantic 모델 및 타입 정의
 """
-from typing import List, Literal, Annotated, Dict, Any
+from typing import List, Literal, Annotated, Dict, Any, Optional
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from langchain_core.documents import Document
@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 
 class RouteQuery(BaseModel):
     """사용자 쿼리를 가장 관련성 높은 데이터 소스로 라우팅하는 데이터 모델"""
-    datasource: Literal["vectorstore", "web_search"] = Field(
+    datasource: Literal["vectorstore", "web_search", "image_analysis"] = Field(
         ...,
         description="""농업 질문을 분석하여 적절한 데이터 소스로 라우팅하세요.
         
@@ -25,7 +25,11 @@ class RouteQuery(BaseModel):
 - 농업과 무관한 일반적인 질문
 - 딸기나 토마토 벡터스토어에 정보가 부족한 질문
 
-반드시 "vectorstore" 또는 "web_search" 중 하나만 선택하세요.""",
+**image_analysis 선택 조건:**
+- 이미지가 포함된 질문
+- 이미지에 대한 분석이 필요한 질문
+
+반드시 "vectorstore" 또는 "web_search" 또는 "image_analysis" 중 하나만 선택하세요.""",
     )
 
 
@@ -114,19 +118,19 @@ class LLMJudgeScores(BaseModel):
     )
     overall_score: int = Field(
         description="""종합 평가 점수 (0-100점)
-- 위 4개 항목(accuracy, completeness, logical_consistency, usefulness)의 평균값
-- 각 항목의 중요도를 고려하여 계산
-- 70점 이상이면 유효한 답변으로 간주
+- 위 4개 항목(accuracy, completeness, logical_consistency, usefulness)을 종합적으로 평가
+- 각 항목의 중요도를 고려하여 계산하세요
+- 정확성과 완전성을 더 중요하게 평가하세요
 
-정확성과 완전성을 더 중요하게 평가하세요.""",
+**⚠️ 중요**: 임계값 없이 답변의 품질을 종합적으로 판단하여 점수를 부여하세요.""",
         ge=0, le=100
     )
     is_valid: bool = Field(
         description="""답변이 유효한지 여부
-- 모든 점수가 70점 이상이고 overall_score가 70점 이상이면 True
-- 그렇지 않으면 False
+- 답변의 품질을 종합적으로 판단하여 True/False 결정
+- 농업 정보의 정확성과 신뢰성을 고려하여 판단하세요
 
-농업 정보의 정확성과 신뢰성이 중요하므로 기준을 엄격하게 적용하세요.""",
+**⚠️ 중요**: 임계값 없이 답변의 전체적인 품질을 평가하여 판단하세요.""",
     )
     reasoning: str = Field(
         description="""평가 근거를 상세히 설명하세요.
@@ -145,11 +149,12 @@ class LLMJudgeScores(BaseModel):
 - False: 답변이 부정확하거나 불완전하여 재처리 필요
 
 판단 기준:
-1. accuracy와 completeness가 모두 70점 이상
-2. overall_score가 70점 이상
-3. 참조 문서에 충분히 근거하고 있음
-4. 논리적으로 일관되고 유용함
+1. 참조 문서에 충분히 근거하고 있는가?
+2. 논리적으로 일관되고 유용한가?
+3. 질문에 대한 답변이 완전한가?
+4. 실제 농업 현장에서 적용 가능한가?
 
+**⚠️ 중요**: 임계값 없이 답변의 전체적인 품질을 종합적으로 판단하여 결정하세요.
 농업 정보의 정확성이 매우 중요하므로, 확신이 없으면 False를 선택하세요.""",
     )
     
@@ -237,6 +242,14 @@ class GradeAnswer(BaseModel):
     )
 
 
+class ImageRouteQuery(BaseModel):
+    """Route a user question to the most relevant datasource after image analysis."""
+    datasource: Literal["vectorstore", "web_search"] = Field(
+        ...,
+        description="Given a user question choose to route it to web search, vectorstore.",
+    )
+    
+
 class GraphState(TypedDict):
     """LangGraph 워크플로우의 상태를 정의하는 클래스"""
     # 기본 질문 관련 필드들
@@ -272,7 +285,11 @@ class GraphState(TypedDict):
     retrieved_docs: Annotated[List[Document], "Retrieved documents"]
     context: Annotated[str, "Formatted context from documents"]
     answer: Annotated[str, "Generated answer"]
+    original_answer: Annotated[str, "Original RAG answer before refinement"]
     quality_scores: Annotated[Dict[str, float], "RAG quality scores"]
     status: Annotated[str, "Processing status"]
     llm_judge_scores: Annotated[Dict[str, Any], "LLM Judge scores"]
 
+    # 이미지 분석 관련
+    image: Annotated[str, "Image file"]
+    image_result: Annotated[str, "Image analysis result"]

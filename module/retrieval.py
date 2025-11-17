@@ -62,37 +62,58 @@ except ImportError:
 def setup_crop_specific_retriever(crop_name: str):
     """작물별 전용 벡터스토어 설정"""
     try:
-        # 작물별 데이터 경로 설정
+        # 현재 파일 위치를 기준으로 절대 경로 계산
+        current_file = Path(__file__).resolve()
+        # module/retrieval.py -> RAGsystem module/
+        base_dir = current_file.parent.parent
+        
+        # 작물별 데이터 경로 설정 (절대 경로 사용)
         if crop_name == "strawberry":
+            data_dir = base_dir / "data" / "strawberry"
             data_paths = [
-                {"path": "data/strawberry/딸기 재배 일정 통일 및 상세화.pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 재배 기술 정론(최신 교정).pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 재배 기술 총람 (최신 교정).pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 길라잡이.pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 농작업일정.pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 병해충 및 비료.pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 재배메뉴얼.pdf", "crop": "strawberry"},
-                {"path": "data/strawberry/딸기 재배법.pdf", "crop": "strawberry"}
+                {"path": str(data_dir / "딸기 재배 일정 통일 및 상세화.pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 재배 기술 정론(최신 교정).pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 재배 기술 총람 (최신 교정).pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 길라잡이.PDF"), "crop": "strawberry"},  # 대문자 확장자
+                {"path": str(data_dir / "딸기 길라잡이.pdf"), "crop": "strawberry"},  # 소문자 확장자도 시도
+                {"path": str(data_dir / "딸기 농작업일정.pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 병해충 및 비료.pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 재배메뉴얼.pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 재배법.pdf"), "crop": "strawberry"},
+                {"path": str(data_dir / "딸기 재배일정표.pdf"), "crop": "strawberry"}  # ⭐ 새로 추가
             ]
-            persist_dir = "db/strawberry_vector"
+            persist_dir = str(base_dir / "db" / "strawberry_vector")
         elif crop_name == "tomato":
+            data_dir = base_dir / "data" / "tomato"
             data_paths = [
-                {"path": "data/tomato/토마토 반촉성재배 상세 일정 생성.pdf", "crop": "tomato"},
-                {"path": "data/tomato/토마토 반촉성재배 기술 정론 (교정).pdf", "crop": "tomato"},
-                {"path": "data/tomato/토마토 상업 재배 기술 총람 (교정).pdf", "crop": "tomato"},
-                {"path": "data/tomato/토마토 농작업일정.pdf", "crop": "tomato"},
-                {"path": "data/tomato/토마토 백과사전.pdf", "crop": "tomato"},
-                {"path": "data/tomato/토마토 병해충 및 비료.pdf", "crop": "tomato"},
-                {"path": "data/tomato/토마토 재배법.pdf", "crop": "tomato"}
+                {"path": str(data_dir / "토마토 반촉성재배 상세 일정 생성.pdf"), "crop": "tomato"},
+                {"path": str(data_dir / "토마토 반촉성재배 기술 정론 (교정).pdf"), "crop": "tomato"},
+                {"path": str(data_dir / "토마토 상업 재배 기술 총람 (교정).pdf"), "crop": "tomato"},
+                {"path": str(data_dir / "토마토 농작업일정.pdf"), "crop": "tomato"},
+                {"path": str(data_dir / "토마토 백과사전.pdf"), "crop": "tomato"},
+                {"path": str(data_dir / "토마토 병해충 및 비료.pdf"), "crop": "tomato"},
+                {"path": str(data_dir / "토마토 재배법.pdf"), "crop": "tomato"}
             ]
-            persist_dir = "db/tomato_vector"
+            persist_dir = str(base_dir / "db" / "tomato_vector")
         else:
             raise ValueError(f"지원되지 않는 작물: {crop_name}")
 
-        # 파일 존재 확인
-        valid_paths = [item for item in data_paths if os.path.exists(item["path"])]
+        # 파일 존재 확인 (중복 제거)
+        valid_paths = []
+        seen_paths = set()
+        for item in data_paths:
+            path = item["path"]
+            if os.path.exists(path) and path not in seen_paths:
+                valid_paths.append(item)
+                seen_paths.add(path)
+        
         if not valid_paths:
-            raise FileNotFoundError(f"⚠️ {crop_name} 데이터 파일을 찾을 수 없습니다.")
+            debug_print(f"⚠️ {crop_name} 데이터 디렉토리: {data_dir}")
+            debug_print(f"⚠️ 찾을 수 없는 파일 목록:")
+            for item in data_paths:
+                if not os.path.exists(item["path"]):
+                    debug_print(f"   - {item['path']}")
+            raise FileNotFoundError(f"⚠️ {crop_name} 데이터 파일을 찾을 수 없습니다. {data_dir} 디렉토리를 확인하세요.")
 
         debug_print(f"📚 {crop_name} 전용 벡터스토어 생성 중...")
         debug_print(f"   - 데이터 파일: {len(valid_paths)}개")

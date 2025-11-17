@@ -9,11 +9,11 @@ from .nodes import (
     retrieval_node,
     augmentation_node,
     generation_node,
-    quality_check_node,
-    llm_judge_validation_node,
     route_question,
     retrieve,
-    check_question_validity
+    check_question_validity,
+    analyze_image,
+    decide_image_route
 )
 
 
@@ -26,30 +26,26 @@ def decide_validity(state: GraphState) -> str:
         return END
 
 
+def has_image(state: GraphState) -> bool:
+    """이미지 존재 여부 확인"""
+    image = state.get("image", "")
+    return image and image != "" and image is not None
+
+
 def decide_route(state: GraphState) -> str:
     """라우팅 결정을 위한 조건부 엣지 함수"""
     route = state.get("route", "web_search")  # 원래 기본값 유지
     
     debug_print(f"Route decision: {route}")
     
+    if has_image(state):
+        return "analyze_image"
+
     # 하이브리드 검색 제거 - 단순 라우팅만 수행
     if route == "vectorstore":
         return "retrieve"
     else:
         return "web_search"
-
-
-def decide_quality(state: GraphState) -> str:
-    """품질 점수에 따른 재처리 결정"""
-    quality_scores = state.get("quality_scores", {})
-    overall_score = quality_scores.get("overall_score", 0.0)
-    retry_count = state.get("retry_count", 0)
-    
-    if overall_score < 0.7 and retry_count < 2:
-        debug_print(f"Quality too low ({overall_score:.3f}), retrying...")
-        return "transform_query_node"
-    else:
-        return END
 
 
 def decide_final_quality(state: GraphState) -> str:
@@ -96,6 +92,8 @@ def create_workflow(nodes_dict: dict):
     # 노드 추가
     if "check_validity" in nodes_dict:
         workflow.add_node("check_validity", nodes_dict["check_validity"])
+    if "assess_complexity_node" in nodes_dict:
+        workflow.add_node("assess_complexity_node", nodes_dict["assess_complexity_node"])
     if "route_question" in nodes_dict:
         workflow.add_node("route_question", nodes_dict["route_question"])
     if "retrieve" in nodes_dict:
@@ -108,22 +106,49 @@ def create_workflow(nodes_dict: dict):
         workflow.add_node("augmentation_node", nodes_dict["augmentation_node"])
     if "generation_node" in nodes_dict:
         workflow.add_node("generation_node", nodes_dict["generation_node"])
-    if "quality_check_node" in nodes_dict:
-        workflow.add_node("quality_check_node", nodes_dict["quality_check_node"])
-    if "llm_judge_validation" in nodes_dict:
-        workflow.add_node("llm_judge_validation", nodes_dict["llm_judge_validation"])
+    if "answer_refinement_node" in nodes_dict:
+        workflow.add_node("answer_refinement_node", nodes_dict["answer_refinement_node"])
+    if "llm_judge_node" in nodes_dict:
+        workflow.add_node("llm_judge_node", nodes_dict["llm_judge_node"])
+    if "transform_query_node" in nodes_dict:
+        workflow.add_node("transform_query_node", nodes_dict["transform_query_node"])
+    if "analyze_image" in nodes_dict:
+        workflow.add_node("analyze_image", nodes_dict["analyze_image"])
     
     # 워크플로우 연결
     workflow.add_edge(START, "check_validity")
     
-    workflow.add_conditional_edges(
-        "check_validity",
-        decide_validity,
-        {
-            "route_question": "route_question",
-            END: END
-        }
-    )
+    # check_validity 후 복잡도 평가 또는 라우팅으로 분기
+    if "assess_complexity_node" in nodes_dict:
+        # 복잡도 평가가 있는 경우: check_validity → assess_complexity → route_question
+        def decide_validity_with_complexity(state: GraphState) -> str:
+            """질문 유효성에 따른 라우팅 결정 (복잡도 평가 포함)"""
+            is_valid = state.get("question_valid", True)
+            if is_valid:
+                return "assess_complexity_node"
+            else:
+                return END
+        
+        workflow.add_conditional_edges(
+            "check_validity",
+            decide_validity_with_complexity,
+            {
+                "assess_complexity_node": "assess_complexity_node",
+                END: END
+            }
+        )
+        # 복잡도 평가 후 라우팅으로
+        workflow.add_edge("assess_complexity_node", "route_question")
+    else:
+        # 복잡도 평가가 없는 경우: check_validity → route_question
+        workflow.add_conditional_edges(
+            "check_validity",
+            decide_validity,
+            {
+                "route_question": "route_question",
+                END: END
+            }
+        )
     
     # decide_route 함수가 반환할 수 있는 값들만 포함
     route_mapping = {
@@ -133,6 +158,9 @@ def create_workflow(nodes_dict: dict):
     # web_search 노드가 있는 경우에만 추가
     if "web_search" in nodes_dict:
         route_mapping["web_search"] = "web_search"
+
+    if "analyze_image" in nodes_dict:
+        route_mapping["analyze_image"] = "analyze_image"
     
     # decide_route 함수를 래핑하여 존재하지 않는 노드에 대한 fallback 처리
     # route_mapping을 먼저 생성한 후 래핑 함수 내부에서 사용
@@ -150,64 +178,66 @@ def create_workflow(nodes_dict: dict):
         safe_decide_route,  # 래핑된 함수 사용
         route_mapping
     )
+
+    if "analyze_image" in nodes_dict:
+    # image_analysis 후 직접 라우팅
+        image_route_mapping = {
+            "retrieve": "retrieve"
+        }
     
-    # 검색 → 복잡도 평가 → RAG 핵심 검색 (transform_query_node는 피드백 루프에서만 사용)
-    if "assess_complexity_node" in nodes_dict:
-        workflow.add_node("assess_complexity_node", nodes_dict["assess_complexity_node"])
-        workflow.add_edge("retrieve", "assess_complexity_node")
-        # 노드가 있는 경우에만 엣지 추가
         if "web_search" in nodes_dict:
-            workflow.add_edge("web_search", "assess_complexity_node")
-        
-        # assess_complexity_node에서 retrieval_node로 직접 연결 (transform_query_node 건너뛰기)
-        workflow.add_edge("assess_complexity_node", "retrieval_node")
-        
-        # transform_query_node는 피드백 루프에서만 사용 (원래 검색 경로로 재검색)
-        if "transform_query_node" in nodes_dict:
-            workflow.add_node("transform_query_node", nodes_dict["transform_query_node"])
-            # transform_query_node 후 원래 검색 경로로 재검색
-            workflow.add_conditional_edges(
-                "transform_query_node",
-                decide_route,  # 원래 검색 경로 확인
-                {
-                    "retrieve": "retrieve",
-                    "web_search": "web_search" if "web_search" in nodes_dict else "retrieve"
-                }
-            )
-    else:
-        workflow.add_edge("retrieve", "retrieval_node")
-        # 노드가 있는 경우에만 엣지 추가
-        if "web_search" in nodes_dict:
-            workflow.add_edge("web_search", "retrieval_node")
-        
-        # transform_query_node는 피드백 루프에서만 사용 (원래 검색 경로로 재검색)
-        if "transform_query_node" in nodes_dict:
-            workflow.add_node("transform_query_node", nodes_dict["transform_query_node"])
-            # transform_query_node 후 원래 검색 경로로 재검색
-            workflow.add_conditional_edges(
-                "transform_query_node",
-                decide_route,  # 원래 검색 경로 확인
-                {
-                    "retrieve": "retrieve",
-                    "web_search": "web_search" if "web_search" in nodes_dict else "retrieve"
-                }
-            )
+            image_route_mapping["web_search"] = "web_search"
+    
+        workflow.add_conditional_edges(
+            "analyze_image",
+            decide_image_route,  # 라우팅 함수 사용
+            image_route_mapping
+        )
+    
+    # 검색 → RAG 핵심 검색 (transform_query_node는 피드백 루프에서만 사용)
+    # 복잡도 평가는 이미 라우팅 전에 완료되었으므로, 검색 후 바로 retrieval_node로 연결
+    workflow.add_edge("retrieve", "retrieval_node")
+    # 노드가 있는 경우에만 엣지 추가
+    if "web_search" in nodes_dict:
+        workflow.add_edge("web_search", "retrieval_node")
+    
+    # transform_query_node는 피드백 루프에서만 사용 (원래 검색 경로로 재검색)
+    if "transform_query_node" in nodes_dict:
+        # transform_query_node 후 원래 검색 경로로 재검색
+        workflow.add_conditional_edges(
+            "transform_query_node",
+            decide_route,  # 원래 검색 경로 확인
+            {
+                "retrieve": "retrieve",
+                "web_search": "web_search" if "web_search" in nodes_dict else "retrieve",
+                "analyze_image": "analyze_image" if "analyze_image" in nodes_dict else "retrieve"
+            }
+        )
     
     # RAG 핵심 흐름
     workflow.add_edge("retrieval_node", "augmentation_node")
     workflow.add_edge("augmentation_node", "generation_node")
-    workflow.add_edge("generation_node", "quality_check_node")
-    workflow.add_edge("quality_check_node", "llm_judge_validation")
     
-    # LLM Judge 검증에 따른 최종 분기
-    workflow.add_conditional_edges(
-        "llm_judge_validation",
-        decide_final_quality,
-        {
-            "transform_query_node": "transform_query_node" if "transform_query_node" in nodes_dict else "retrieval_node",
-            END: END
-        }
-    )
+    # 답변 정리 노드 추가
+    if "answer_refinement_node" in nodes_dict:
+        workflow.add_edge("generation_node", "answer_refinement_node")
+        
+        # LLM Judge 노드가 있는 경우: answer_refinement_node → llm_judge_node → decide_final_quality
+        if "llm_judge_node" in nodes_dict:
+            workflow.add_edge("answer_refinement_node", "llm_judge_node")
+            workflow.add_conditional_edges(
+                "llm_judge_node",
+                decide_final_quality,
+                {
+                    "transform_query_node": "transform_query_node" if "transform_query_node" in nodes_dict else "retrieval_node",
+                    END: END
+                }
+            )
+        else:
+            # llm_judge_node가 없는 경우 answer_refinement_node에서 직접 종료
+            workflow.add_edge("answer_refinement_node", END)
+    else:
+        # answer_refinement_node가 없는 경우 generation_node에서 직접 종료
+        workflow.add_edge("generation_node", END)
     
     return workflow.compile()
-

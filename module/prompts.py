@@ -283,6 +283,8 @@ def setup_llm_and_prompts(llm=None):
 
 경작지 정보: {farm_info}
 
+이미지 분석 결과: {image_result}
+
 위 정보를 바탕으로 질문에 대한 정확하고 전문적인 답변을 제공해주세요.
         """),
     ])
@@ -332,14 +334,24 @@ def setup_llm_and_prompts(llm=None):
         ("human", "사용자 질문: {question} \n\n LLM 생성 답변: {generation}"),
     ])
     
+    image_route_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an expert at routing a user question to a vectorstore, web search
+The vectorstore contains documents related to Crop cultivation, pest diagnosis, pesticide and fertilizer(compost)
+Use the vectorstore for questions on these topics.
+Otherwise, use web-search.""",),
+        ("human", "사용자 질문: {question} \n 이미지 분석 결과: {image_result}"),
+    ])
+
+
     # LLM 기반 평가를 위한 structured output 체인 생성 (프롬프트와 결합)
-    from .models import GradeDocuments, GradeHallucinations, GradeAnswer
+    from .models import GradeDocuments, GradeHallucinations, GradeAnswer, ImageRouteQuery
     
     # 프롬프트와 structured output을 결합한 체인 생성
     grade_documents_grader = grade_documents_prompt | llm.with_structured_output(GradeDocuments)
     hallucination_grader = hallucination_grader_prompt | llm.with_structured_output(GradeHallucinations)
     answer_grader = answer_grader_prompt | llm.with_structured_output(GradeAnswer)
-    
+    image_route_router = image_route_prompt | llm.with_structured_output(ImageRouteQuery)
+
     return {
         "llm": llm,
         "question_router": question_router,
@@ -351,5 +363,7 @@ def setup_llm_and_prompts(llm=None):
         # LLM 기반 평가 체인 추가
         "grade_documents_grader": grade_documents_grader,
         "hallucination_grader": hallucination_grader,
-        "answer_grader": answer_grader
+        "answer_grader": answer_grader,
+        # 이미지 분석 체인
+        "image_route_router": image_route_router,
     }

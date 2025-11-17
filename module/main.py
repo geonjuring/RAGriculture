@@ -8,7 +8,6 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_teddynote.messages import random_uuid
 from .config import MODEL_NAME, debug_print
 from .retrieval import setup_all_crop_retrievers, setup_reranker, setup_web_search_tool
-from .metrics import RAGMetrics
 from .prompts import setup_llm_and_prompts
 from .nodes import initialize_nodes
 from .workflow import create_workflow
@@ -49,20 +48,7 @@ def initialize_rag_system():
     rag_pipeline = None
     debug_print("📚 RAG 파이프라인: 기본 검색 모드 사용 (벡터스토어 직접 검색)")
     
-    # 7. RAG 메트릭스 초기화 (LLM 기반 평가 사용)
-    debug_print("📊 RAG 메트릭스 초기화 중...")
-    rag_metrics = RAGMetrics(
-        embedding_model=embedding_model,
-        llm=llm,
-        grade_documents_grader=prompts.get("grade_documents_grader"),
-        hallucination_grader=prompts.get("hallucination_grader"),
-        answer_grader=prompts.get("answer_grader")
-    )
-    
-    # rag_pipeline이 None이므로 rag_metrics는 별도로 관리
-    # (rag_pipeline이 있을 때만 업데이트)
-    
-    # 8. 노드 함수 초기화
+    # 7. 노드 함수 초기화
     debug_print("🔧 노드 함수 초기화 중...")
     from . import nodes
     nodes.initialize_nodes(
@@ -74,10 +60,10 @@ def initialize_rag_system():
         question_router=prompts.get("question_router"),  # 프롬프트 전달
         question_validator=prompts.get("question_validator"),  # 프롬프트 전달
         web_search_tool=web_search_tool,  # 웹 검색 도구 전달
-        rag_metrics=rag_metrics  # RAG 메트릭스 전달
+        image_route_router=prompts.get("image_route_router")  # 이미지 라우팅 라우터 전달
     )
     
-    # 9. 워크플로우 구성
+    # 8. 워크플로우 구성
     debug_print("🔄 워크플로우 구성 중...")
     nodes_dict = {
         "check_validity": nodes.check_question_validity,
@@ -89,8 +75,9 @@ def initialize_rag_system():
         "retrieval_node": nodes.retrieval_node,
         "augmentation_node": nodes.augmentation_node,
         "generation_node": nodes.generation_node,
-        "quality_check_node": nodes.quality_check_node,
-        "llm_judge_validation": nodes.llm_judge_validation_node,
+        "answer_refinement_node": nodes.answer_refinement_node,  # 답변 정리 노드 (보강 및 정리만)
+        "llm_judge_node": nodes.llm_judge_node,  # LLM Judge 노드 (품질 평가 및 검증)
+        "analyze_image": nodes.analyze_image,
     }
     
     app = create_workflow(nodes_dict)
@@ -101,7 +88,6 @@ def initialize_rag_system():
         "app": app,
         "llm": llm,
         "embedding_model": embedding_model,
-        "rag_metrics": rag_metrics,
         "crop_retrievers": crop_retrievers,
         "reranker": reranker,
         "web_search_tool": web_search_tool,
@@ -110,9 +96,11 @@ def initialize_rag_system():
     }
 
 
-def run_rag_system(question: str, config: Dict[str, Any] = None) -> Dict[str, Any]:
+def run_rag_system(question: str, image_path: str = None, config: Dict[str, Any] = None) -> Dict[str, Any]:
     """RAG 시스템 실행 함수"""
     debug_print(f"\n🔍 질문: {question}")
+    if image_path:
+        debug_print(f"🖼️ 이미지: {image_path}")
     debug_print("=" * 80)
     
     # 시스템 초기화 (필요시)
@@ -134,6 +122,7 @@ def run_rag_system(question: str, config: Dict[str, Any] = None) -> Dict[str, An
     # 입력 설정
     inputs = {
         "question": question,
+        "image": image_path if image_path else None,
         "retry_count": 0
     }
     
@@ -141,9 +130,29 @@ def run_rag_system(question: str, config: Dict[str, Any] = None) -> Dict[str, An
     result = app.invoke(inputs, run_config)
     
     # 결과 출력
-    debug_print(f"\n💬 답변:")
-    debug_print("-" * 50)
-    debug_print(result.get("answer", result.get("generation", "답변을 생성할 수 없습니다.")))
+    original_answer = result.get("original_answer", "")
+    refined_answer = result.get("answer", result.get("generation", "답변을 생성할 수 없습니다."))
+    
+    if original_answer and original_answer != refined_answer:
+        # 원본 답변과 보강된 답변 모두 출력
+        debug_print(f"\n📝 원본 RAG 답변:")
+        debug_print("-" * 50)
+        debug_print(original_answer)
+        debug_print("\n" + "=" * 50)
+        debug_print(f"\n✨ 보강된 RAG 답변:")
+        debug_print("-" * 50)
+        debug_print(refined_answer)
+    else:
+        # 정리되지 않은 경우 원본 답변만 출력
+        debug_print(f"\n💬 답변:")
+        debug_print("-" * 50)
+        debug_print(refined_answer)
+    
+    # 이미지 분석 결과 출력
+    if image_path:
+        image_result = result.get("image_result", "")
+        if image_result:
+            debug_print(f"\n🖼️ 이미지 분석 결과: {image_result}")
     
     # 처리 정보 출력
     if result.get("question_valid") is False:
