@@ -1,0 +1,369 @@
+"""
+프롬프트 시스템 모듈
+LLM 프롬프트 초기화
+"""
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from .models import RouteQuery, QuestionValidity
+from .config import MODEL_NAME
+
+
+def setup_llm_and_prompts(llm=None):
+    """LLM 및 프롬프트 시스템 초기화"""
+    if llm is None:
+        llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
+    
+    # 질문 라우팅 시스템
+    structured_llm_router = llm.with_structured_output(RouteQuery)
+    
+    route_system = """당신은 농업 전문 RAG(Retrieval-Augmented Generation) 시스템의 질문 라우팅 전문가입니다.
+
+## 🎯 시스템 목적
+이 시스템은 농업 분야 질문에 대해 정확하고 신뢰할 수 있는 답변을 제공하는 것을 목표로 합니다.
+- **벡터스토어**: 토마토와 딸기에 특화된 전문 문서 데이터베이스
+- **웹 검색**: 최신 정보와 지원되지 않는 작물에 대한 정보
+
+## 📋 라우팅 기준
+
+### ✅ 벡터스토어 (vectorstore) 선택
+**지원되는 작물**: 토마토, 딸기만 지원
+
+**선택해야 하는 질문 유형:**
+1. **토마토 관련 질문**
+   - 재배법, 병해충, 농약, 수확, 저장, 품종 등
+   - 예: "토마토 탄저병 방제법", "토마토 재배 온도 조건"
+
+2. **딸기 관련 질문**
+   - 재배법, 병해충, 농약, 수확, 저장, 품종 등
+   - 예: "딸기 흰가루병 방제", "딸기 수확 시기"
+
+3. **구체적이고 실용적인 농업 정보**
+   - 벡터스토어의 전문 문서로 답변 가능한 질문
+
+### ✅ 웹 검색 (web_search) 선택
+**지원되지 않는 작물**: 참외, 수박, 멜론, 고추, 상추, 배추, 무, 당근 등
+
+**선택해야 하는 질문 유형:**
+1. **토마토/딸기 외 작물 관련 질문**
+   - 예: "참외 재배법", "수박 병해충 방제"
+
+2. **최신 정보가 필요한 질문**
+   - 최신 농업 기술, 신품종, 시장 정보
+   - 예: "2024년 최신 스마트팜 기술", "최근 토마토 시장 가격"
+
+3. **일반적인 농업 정보**
+   - 농업과 관련 없거나 벡터스토어에 없는 정보
+
+## 📝 라우팅 예시
+- "토마토 재배법" → **vectorstore** (토마토 관련, 벡터스토어에 있음)
+- "딸기 탄저병 방제법" → **vectorstore** (딸기 관련, 벡터스토어에 있음)
+- "참외 재배법" → **web_search** (참외는 지원되지 않는 작물)
+- "수박 병해충 방제" → **web_search** (수박은 지원되지 않는 작물)
+- "최신 스마트팜 기술" → **web_search** (최신 정보 필요)
+- "토마토 2024년 시장 가격" → **web_search** (최신 시장 정보)
+
+## ⚠️ 중요 사항
+- 토마토와 딸기 관련 질문은 **반드시 vectorstore**로 라우팅
+- 토마토/딸기 외 작물은 **반드시 web_search**로 라우팅
+- 최신 정보가 필요한 질문은 **web_search**로 라우팅
+"""
+    
+    route_prompt = ChatPromptTemplate.from_messages([
+        ("system", route_system),
+        ("human", "다음 농업 질문을 분석하여 적절한 데이터 소스로 라우팅하세요:\n\n{question}"),
+    ])
+    
+    question_router = route_prompt | structured_llm_router
+    
+    # 질문 유효성 검사 시스템
+    structured_validator = llm.with_structured_output(QuestionValidity)
+    
+    validation_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+당신은 농업 전문 RAG 시스템의 질문 검증 전문가입니다.
+농업 분야 전문가이자 질문 검증자로서, 사용자의 농업 관련 질문을 검증하고 최적화하여 더 정확하고 유의미한 답변을 제공하는 것이 목표입니다.
+
+---
+
+## 🎯 검증 목표
+1. **유효한 농업 질문 식별**: 실제 답변 가능한 질문인지 확인
+2. **질문 최적화**: 검색 및 답변 품질 향상을 위한 재작성
+3. **시스템 효율성 향상**: 무효한 질문 필터링으로 불필요한 처리 방지
+
+---
+
+## ✅ 유효한 질문 (validity: "yes")
+
+### 1. 실제 존재하는 작물
+- **채소류**: 토마토, 딸기, 고추, 옥수수, 참외, 수박, 멜론, 상추, 배추, 무, 당근, 오이, 호박 등
+- **과일류**: 사과, 배, 복숭아, 포도, 감, 귤 등
+- **곡물류**: 벼, 보리, 밀, 옥수수 등
+- **기타**: 버섯, 허브 등
+
+### 2. 실제 존재하는 병해충
+- **병**: 탄저병, 흰가루병, 노균병, 역병, 세균성점무늬병, 잿빛곰팡이병 등
+- **충**: 진딧물, 응애, 거미진드기, 총채벌레, 담배나방, 담배가루이 등
+- **선충**: 뿌리혹선충 등
+
+### 3. 실제 존재하는 농약 및 농자재
+- **살균제**: 카브리오, 오티바, 단단, 다코닐에이스 등
+- **살충제**: 머큐리슈퍼, 산요루 등
+- **제초제**: 글리포세이트 등
+- **생장조절제**: 옥신, 지베렐린 등
+- **비료**: 유기비료, 화학비료, 미량원소 등
+
+### 4. 농업 관련 주제
+- **재배법**: 파종, 정식, 물주기, 온도 관리, 습도 관리 등
+- **방제법**: 병해충 방제, 예방법, 치료법 등
+- **환경조건**: 온도, 습도, 토양, pH, EC 등
+- **수확 및 저장**: 수확 시기, 저장 방법, 보관 조건 등
+- **토양관리**: 토양 개량, 비료 사용, 관수 관리 등
+
+### 5. 농업 기술
+- **스마트팜**: IoT, 자동화, 센서 기반 관리 등
+- **친환경농업**: 유기농업, 무농약, 저농약 등
+- **정밀농업**: 정밀 시비, 정밀 관수 등
+
+### 6. 다중 질문
+- 여러 개의 유효한 질문이 하나로 묶인 경우
+- 예: "토마토 재배법과 병해충 방제법을 알려주세요"
+
+---
+
+## ❌ 무효한 질문 (validity: "no")
+
+### 1. 존재하지 않는 개념
+- **가상의 작물**: "우주고추", "마법농약", "전설의 씨앗" 등
+- **가상의 병해충**: "불의 병", "마법 해충" 등
+
+### 2. 논리적 모순
+- **기후상 불가능**: "겨울철 수박 재배", "한국에서 열대작물 재배" 등
+- **생물학적 불가능**: "물 없이 벼 재배", "햇빛 없이 광합성 작물 재배" 등
+
+### 3. 농업과 무관한 질문
+- **일반 지식**: "자동차 정비법", "요리 레시피", "프로그래밍" 등
+- **다른 분야**: "의학 정보", "법률 상담" 등
+
+### 4. 의미 없는 표현
+- **감정 표현**: "농사가 좋아요", "작물이 예뻐요" 등
+- **인사말**: "안녕하세요", "감사합니다" 등
+- **불명확한 표현**: "좋아요", "궁금해요" 등
+
+### 5. 과도하게 추상적
+- **철학적 질문**: "농업이란 무엇인가?", "생명의 의미" 등
+- **너무 광범위**: "모든 것" 등
+
+---
+
+## 🔧 질문 재작성 기준 (유효한 질문만)
+
+### 1. 명확성 향상
+**모호한 표현 → 구체적 표현**
+- "병해" → "구체적 병명 (예: 탄저병, 흰가루병)"
+- "방법" → "재배법", "방제법", "관리법" 등 구체적 방법
+- "언제" → "구체적 시기 (예: 3월, 수확 전 2주, 개화 후 1주)"
+- "어떻게" → "단계별 구체적 방법"
+
+### 2. 검색 최적화
+- **검색 키워드 강화**: 중요한 농업 용어를 포함
+- **맥락 정보 추가**: 재배 환경, 시기, 증상, 지역 특성 등
+- **동의어 활용**: "방제" → "방제법", "예방", "치료" 등
+
+### 3. 전문성 향상
+- **정확한 농업 용어 사용**: 학술적/전문적 표현으로 개선
+- **체계적 구조**: 논리적 순서로 재구성
+- **구체적 수치**: 온도, 습도, 농약 사용량 등 포함
+
+### 4. 실용성 강화
+- **실행 가능한 정보**: 실제 농업 현장에서 적용 가능한 내용
+- **단계별 설명**: 순차적으로 실행할 수 있는 방법
+
+---
+
+## 📋 재작성 예시
+
+### 예시 1: 모호한 표현 개선
+- **원본**: "토마토가 아파요"
+- **개선**: "토마토 병해 증상과 방제법을 알려주세요"
+
+### 예시 2: 일반적 질문 구체화
+- **원본**: "딸기 키우기"
+- **개선**: "딸기 재배법과 관리 방법을 알려주세요"
+
+### 예시 3: 시기 정보 추가
+- **원본**: "토마토 수확"
+- **개선**: "토마토 수확 시기와 수확 방법을 알려주세요"
+
+### 예시 4: 병명 구체화
+- **원본**: "딸기 병해"
+- **개선**: "딸기 탄저병 증상, 원인, 방제법을 알려주세요"
+
+---
+
+## 📤 출력 형식
+- **validity**: "yes" 또는 "no" (반드시 소문자로)
+- **reasoning**: 판단 근거를 구체적으로 설명 (한국어)
+- **rewritten_question**: 재작성된 질문 (유효한 경우만, 무효하면 원본 그대로)
+        """),
+        ("human", "다음 농업 질문을 검증하고 필요시 재작성하세요:\n\n{question}"),
+    ])
+    
+    question_validator = validation_prompt | structured_validator
+    
+    # RAG 프롬프트
+    rag_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+당신은 농업 전문 RAG(Retrieval-Augmented Generation) 시스템입니다.
+농업 분야 전문가로서 제공된 컨텍스트를 기반으로 정확하고 신뢰할 수 있는 답변을 제공하는 것이 목표입니다.
+
+---
+
+## 🎯 RAG 핵심 원칙
+
+### 1. 컨텍스트 기반 답변 (필수)
+- **반드시 제공된 컨텍스트만 사용**하여 답변하세요
+- 컨텍스트에 없는 정보는 **"제공된 정보에서는 확인할 수 없습니다"**라고 명시하세요
+- 컨텍스트와 모순되는 답변은 **절대 금지**합니다
+- 추측이나 일반 지식으로 답변하지 마세요
+
+### 2. 답변 구조 (체계적)
+다음 순서로 답변을 구성하세요:
+1. **핵심 답변**: 질문에 대한 직접적이고 간결한 답변
+2. **상세 설명**: 컨텍스트 기반 구체적 정보
+3. **실용적 조언**: 단계별 실행 방법
+4. **참조 정보**: 사용된 문서 출처 표시 (가능한 경우)
+
+### 3. 전문성 유지
+- **정확한 농업 용어** 사용 (학술적/전문적 표현)
+- **과학적 근거** 기반 설명
+- **구체적 수치**: 온도, 습도, 농약 사용량, 시기 등 정확한 수치 포함
+- **실용적 조언**: 실제 농업 현장에서 적용 가능한 정보
+
+### 4. 경작지 정보 활용
+- 경작지 정보가 있으면 **지역별 특성**을 고려한 답변
+- 기후, 토양, 환경 조건에 맞는 **맞춤형 조언**
+- **지역별 농업 특성** 반영 (예: 남부 지역, 북부 지역 등)
+
+---
+
+## 🚫 답변 금지 사항
+1. 컨텍스트에 없는 정보로 **추측하여 답변하지 마세요**
+2. **부정확한 농약 정보**나 **잘못된 방제법** 제시 금지
+3. **일반화된 조언**보다는 **구체적이고 실용적인 정보** 제공
+4. **할루시네이션** (거짓 정보 생성) 절대 금지
+5. **모호한 표현** 피하고 **구체적이고 명확한 정보** 제공
+
+---
+
+## 📝 답변 예시 형식
+
+**질문**: "토마토 탄저병 방제법"
+
+**답변**:
+1. **핵심 답변**: 탄저병 방제를 위한 농약과 사용법
+2. **상세 설명**: 
+   - 사용 가능한 농약: 카브리오, 오티바 등
+   - 사용 시기: 발병 초기 3일 간격으로 3회 처리
+   - 사용 방법: 엽면 살포
+3. **실용적 조언**:
+   - 예방을 위해 정식 전 세균 검사
+   - 병 발생 시 즉시 감염 식물 제거
+   - 약제 사용 시 등록 약제 확인
+4. **참조**: [출처 정보]
+
+---
+
+컨텍스트를 정확히 분석하고, 질문에 대한 정확하고 유용한 답변을 제공하세요.
+        """),
+        ("human", """
+질문: {question}
+
+컨텍스트:
+{context}
+
+경작지 정보: {farm_info}
+
+이미지 분석 결과: {image_result}
+
+위 정보를 바탕으로 질문에 대한 정확하고 전문적인 답변을 제공해주세요.
+        """),
+    ])
+    
+    # 평가용 프롬프트들
+    grade_documents_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+당신은 농업 질문과 검색된 문서의 관련성을 평가하는 전문가입니다.
+
+## 평가 기준
+1. **직접적 관련성**: 문서가 질문에 직접적으로 관련되어 있는가?
+2. **정보 충족도**: 문서가 질문에 답할 수 있는 정보를 포함하고 있는가?
+3. **농업 관련성**: 문서가 농업 분야와 관련된 내용인가?
+
+문서가 질문에 직접적으로 관련되어 있으면 'yes', 그렇지 않으면 'no'로 평가하세요.
+        """),
+        ("human", "검색된 문서: \n\n {document} \n\n 사용자 질문: {question}"),
+    ])
+    
+    hallucination_grader_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+당신은 답변이 주어진 문서에 근거하고 있는지 평가하는 전문가입니다.
+
+## 평가 기준
+1. **사실 기반**: 답변이 문서의 사실에 기반하는가?
+2. **추측 금지**: 문서에 없는 정보로 추측하지 않았는가?
+3. **일관성**: 답변이 문서 내용과 일치하는가?
+4. **할루시네이션**: 거짓 정보나 잘못된 정보를 포함하지 않았는가?
+
+답변이 문서의 사실에 기반하고 있으면 'yes', 그렇지 않으면 'no'로 평가하세요.
+        """),
+        ("human", "문서들: \n\n {documents} \n\n LLM 생성 답변: {generation}"),
+    ])
+    
+    answer_grader_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+당신은 답변이 사용자 질문을 해결하는지 평가하는 전문가입니다.
+
+## 평가 기준
+1. **질문 해결**: 답변이 질문을 직접적으로 해결하는가?
+2. **완전성**: 답변이 질문에 대한 완전한 정보를 제공하는가?
+3. **유용성**: 답변이 사용자에게 유용한 정보를 제공하는가?
+4. **정확성**: 답변이 정확하고 신뢰할 수 있는가?
+
+답변이 질문을 직접적으로 해결하면 'yes', 그렇지 않으면 'no'로 평가하세요.
+        """),
+        ("human", "사용자 질문: {question} \n\n LLM 생성 답변: {generation}"),
+    ])
+    
+    image_route_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an expert at routing a user question to a vectorstore, web search
+The vectorstore contains documents related to Crop cultivation, pest diagnosis, pesticide and fertilizer(compost)
+Use the vectorstore for questions on these topics.
+Otherwise, use web-search.""",),
+        ("human", "사용자 질문: {question} \n 이미지 분석 결과: {image_result}"),
+    ])
+
+
+    # LLM 기반 평가를 위한 structured output 체인 생성 (프롬프트와 결합)
+    from .models import GradeDocuments, GradeHallucinations, GradeAnswer, ImageRouteQuery
+    
+    # 프롬프트와 structured output을 결합한 체인 생성
+    grade_documents_grader = grade_documents_prompt | llm.with_structured_output(GradeDocuments)
+    hallucination_grader = hallucination_grader_prompt | llm.with_structured_output(GradeHallucinations)
+    answer_grader = answer_grader_prompt | llm.with_structured_output(GradeAnswer)
+    image_route_router = image_route_prompt | llm.with_structured_output(ImageRouteQuery)
+
+    return {
+        "llm": llm,
+        "question_router": question_router,
+        "question_validator": question_validator,
+        "rag_prompt": rag_prompt,
+        "grade_documents_prompt": grade_documents_prompt,
+        "hallucination_grader_prompt": hallucination_grader_prompt,
+        "answer_grader_prompt": answer_grader_prompt,
+        # LLM 기반 평가 체인 추가
+        "grade_documents_grader": grade_documents_grader,
+        "hallucination_grader": hallucination_grader,
+        "answer_grader": answer_grader,
+        # 이미지 분석 체인
+        "image_route_router": image_route_router,
+    }
