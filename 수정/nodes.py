@@ -11,15 +11,16 @@ from .utils import get_current_question, preserve_state_fields, get_current_imag
 from .error_handler import robust_error_handling, ErrorType
 from .location import get_location_context
 from .image import image_classification_model, image_classification_processor, all_classes
+from langchain_core.output_parsers import StrOutputParser
 
 
 # 노드 함수들은 전역 변수에 의존하므로 초기화 함수 필요
 def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker_func=None, 
                      question_router=None, question_validator=None, web_search_tool=None,
-                     rag_metrics=None, image_route_router=None):
+                     rag_metrics=None, image_route_router=None, rag_prompt=None):
     """노드 함수들을 초기화하는 함수 (전역 변수 설정)"""
     global _rag_pipeline, _llm, _crop_retrievers, _reranker, _free_reranker
-    global _question_router, _question_validator, _web_search_tool, _rag_metrics, _image_route_router
+    global _question_router, _question_validator, _web_search_tool, _rag_metrics, _image_route_router, _rag_prompt
     
     _rag_pipeline = rag_pipeline
     _llm = llm
@@ -31,7 +32,7 @@ def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker
     _web_search_tool = web_search_tool
     _rag_metrics = rag_metrics
     _image_route_router = image_route_router
-
+    _rag_prompt = rag_prompt
 
 # 전역 변수 (initialize_nodes로 설정됨)
 _rag_pipeline = None
@@ -44,6 +45,7 @@ _question_validator = None
 _web_search_tool = None
 _rag_metrics = None
 _image_route_router = None
+_rag_prompt = None
 
 def retrieval_node(state: GraphState) -> GraphState:
     """검색 노드 - RAG의 핵심"""
@@ -132,13 +134,16 @@ def generation_node(state: GraphState) -> GraphState:
     debug_print("==== [GENERATION NODE] ====")
     question = state["question"]
     context = state["context"]
+    image_result = state.get("image_result", "")
     
     try:
         location_context = get_location_context()
         if location_context and "경작지 위치 정보가 설정되지 않았습니다" not in location_context:
             enhanced_context = f"{context}\n\n{location_context}"
+            farm_info = location_context
         else:
             enhanced_context = context
+            farm_info = "경작지 위치 정보가 설정되지 않았습니다"
 
 
         if _rag_pipeline is None or _rag_pipeline.rag_chain is None:
@@ -148,17 +153,21 @@ def generation_node(state: GraphState) -> GraphState:
                     "status": "error",
                     "error_message": "LLM not initialized"
                 }
+            fallback_prompt = _rag_prompt
+            chain = fallback_prompt | _llm | StrOutputParser()
             
-            fallback_prompt = f"""
-다음 컨텍스트를 바탕으로 질문에 답변해주세요:
+#             fallback_prompt = f"""
+# 다음 컨텍스트를 바탕으로 질문에 답변해주세요:
 
-컨텍스트: {enhanced_context}
+# 컨텍스트: {enhanced_context}
 
-질문: {question}
+# 질문: {question}
 
-답변:
-"""
-            answer = _llm.invoke(fallback_prompt).content
+# 답변:
+# """
+            # answer = _llm.invoke(fallback_prompt).content
+
+            answer = chain.invoke({"question":question, "context":enhanced_context, "farm_info":farm_info, "image_result":image_result})
             return {
                 "answer": answer,
                 "status": "fallback_generated"
