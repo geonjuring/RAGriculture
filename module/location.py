@@ -35,7 +35,9 @@ def set_farm_info(farm_data: Dict[str, Any]) -> None:
     """경작지 정보를 직접 설정하는 함수"""
     global _USER_FARM_INFO
     _USER_FARM_INFO = farm_data
-    debug_print(f"✅ 경작지 정보가 설정되었습니다: {farm_data.get('road_address', 'N/A')}")
+    # road_address가 None이면 legal_address 또는 user_input 사용 도로명 또는 법정동 주소
+    display_address = farm_data.get('road_address') or farm_data.get('legal_address') or farm_data.get('user_input', 'N/A')
+    debug_print(f"✅ 경작지 정보가 설정되었습니다: {display_address}")
 
 
 def clear_farm_info() -> None:
