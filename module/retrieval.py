@@ -9,7 +9,12 @@ from typing import Dict, Any, Optional
 from langchain_core.documents import Document
 from langchain.retrievers.document_compressors import CohereRerank
 from langchain_teddynote.tools.tavily import TavilySearch
-from .config import debug_print
+from .config import (
+    debug_print,
+    WEB_SEARCH_INCLUDE_DOMAINS,
+    WEB_SEARCH_EXCLUDE_DOMAINS,
+    WEB_SEARCH_MAX_RESULTS
+)
 
 # PDFRetrievalChain import 처리 (상위 디렉토리의 rag.pdf 모듈)
 try:
@@ -201,9 +206,51 @@ def setup_reranker():
             return None, None
 
 
-def setup_web_search_tool():
-    """웹 검색 도구 설정"""
-    web_search_tool = TavilySearch(max_results=10)
+def setup_web_search_tool(
+    max_results: Optional[int] = None,
+    include_domains: Optional[list] = None,
+    exclude_domains: Optional[list] = None
+):
+    """
+    웹 검색 도구 설정
+    
+    Args:
+        max_results: 최대 검색 결과 수 (None이면 config.py의 기본값 사용)
+        include_domains: 검색에 포함할 도메인 목록 (None이면 config.py의 기본값 사용)
+        exclude_domains: 검색에서 제외할 도메인 목록 (None이면 config.py의 기본값 사용)
+    
+    Returns:
+        TavilySearch 도구 객체
+    
+    Note:
+        모든 파라미터는 config.py에서 중앙 관리됩니다.
+        함수 호출 시 파라미터를 지정하면 config.py의 기본값을 덮어씁니다.
+    """
+    # config.py의 기본값 사용 (파라미터가 제공되지 않은 경우)
+    if max_results is None:
+        max_results = WEB_SEARCH_MAX_RESULTS
+    
+    if include_domains is None:
+        include_domains = WEB_SEARCH_INCLUDE_DOMAINS
+    
+    if exclude_domains is None:
+        exclude_domains = WEB_SEARCH_EXCLUDE_DOMAINS
+    
+    # 기본 파라미터 설정
+    search_params = {
+        "max_results": max_results
+    }
+    
+    # 도메인 필터링 옵션 추가
+    if include_domains:
+        search_params["include_domains"] = include_domains
+        debug_print(f"✅ 검색 포함 도메인: {include_domains}")
+    
+    if exclude_domains:
+        search_params["exclude_domains"] = exclude_domains
+        debug_print(f"✅ 검색 제외 도메인: {exclude_domains}")
+    
+    web_search_tool = TavilySearch(**search_params)
     web_search_tool.name = "web_search"
     web_search_tool.description = (
         "딸기, 토마토, 망고에 대한 작물 재배법, 병해충, 농약 및 비료(퇴비) 관련 정보가 문서에 없거나 부족할 경우, 웹에서 검색을 수행합니다. "
