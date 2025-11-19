@@ -23,7 +23,9 @@ def decide_validity(state: GraphState) -> str:
     if is_valid:
         return "route_question"
     else:
-        return END
+        # 유효성 검사 실패 시 web_search로 라우팅
+        debug_print("⚠️ 질문 유효성 검사 실패, web_search로 라우팅")
+        return "web_search"
 
 
 def has_image(state: GraphState) -> bool:
@@ -48,15 +50,50 @@ def decide_route(state: GraphState) -> str:
         return "web_search"
 
 
+def decide_document_availability(state: GraphState) -> str:
+    """문서 존재 여부에 따른 라우팅 결정"""
+    documents = state.get("retrieved_docs", state.get("documents", []))
+    route = state.get("route", "vectorstore")
+    
+    # 문서가 없고 원래 경로가 vectorstore면 web_search로 전환
+    if not documents and route == "vectorstore":
+        debug_print("⚠️ 벡터스토어에서 문서를 찾지 못함, web_search로 전환")
+        return "web_search"
+    
+    # 문서가 있으면 계속 진행
+    return "generation_node"
+
+
+def decide_retry_route(state: GraphState) -> str:
+    """재검색 시 경로 결정 (재시도 횟수에 따라 경로 전환)"""
+    retry_count = state.get("retry_count", 0)
+    route = state.get("route", "vectorstore")
+    
+    # 재시도 2회 이상이고 벡터스토어였으면 web_search로 전환
+    if retry_count >= 2 and route == "vectorstore":
+        debug_print(f"⚠️ 재시도 {retry_count}회, 벡터스토어에서 웹검색으로 전환")
+        return "web_search"
+    
+    # 원래 경로 유지
+    return route
+
+
 def decide_final_quality(state: GraphState) -> str:
     """최종 품질 결정 - LLM 판단 직접 사용 (임계값 제거)"""
     llm_judge_scores = state.get("llm_judge_scores", {})
     retry_count = state.get("retry_count", 0)
+    route = state.get("route", "vectorstore")
+    documents = state.get("retrieved_docs", state.get("documents", []))
     
     MAX_RETRIES = 3
     if retry_count >= MAX_RETRIES:
         debug_print(f"최대 재시도 횟수 도달 ({retry_count}/{MAX_RETRIES})")
         return END
+    
+    # 문서가 없고 벡터스토어였으면 web_search로 전환
+    if not documents and route == "vectorstore" and retry_count >= 1:
+        debug_print("⚠️ 문서 없음 + 재시도 중, web_search로 전환")
+        return "web_search"
     
     # LLM의 직접 판단 사용
     should_output = llm_judge_scores.get("should_output", False)
@@ -127,14 +164,16 @@ def create_workflow(nodes_dict: dict):
             if is_valid:
                 return "assess_complexity_node"
             else:
-                return END
+                # 유효성 검사 실패 시 web_search로 라우팅
+                debug_print("⚠️ 질문 유효성 검사 실패, web_search로 라우팅")
+                return "web_search"
         
         workflow.add_conditional_edges(
             "check_validity",
             decide_validity_with_complexity,
             {
                 "assess_complexity_node": "assess_complexity_node",
-                END: END
+                "web_search": "web_search" if "web_search" in nodes_dict else "retrieval_node"
             }
         )
         # 복잡도 평가 후 라우팅으로
@@ -146,7 +185,7 @@ def create_workflow(nodes_dict: dict):
             decide_validity,
             {
                 "route_question": "route_question",
-                END: END
+                "web_search": "web_search" if "web_search" in nodes_dict else "retrieval_node"
             }
         )
     
@@ -201,22 +240,35 @@ def create_workflow(nodes_dict: dict):
     if "web_search" in nodes_dict:
         workflow.add_edge("web_search", "retrieval_node")
     
-    # transform_query_node는 피드백 루프에서만 사용 (원래 검색 경로로 재검색)
+    # transform_query_node는 피드백 루프에서만 사용 (재시도 횟수에 따라 경로 전환)
     if "transform_query_node" in nodes_dict:
-        # transform_query_node 후 원래 검색 경로로 재검색
+        # transform_query_node 후 재시도 횟수에 따라 경로 결정
         workflow.add_conditional_edges(
             "transform_query_node",
-            decide_route,  # 원래 검색 경로 확인
+            decide_retry_route,  # 재시도 횟수에 따라 경로 전환
             {
                 "retrieve": "retrieve",
                 "web_search": "web_search" if "web_search" in nodes_dict else "retrieve",
-                "analyze_image": "analyze_image" if "analyze_image" in nodes_dict else "retrieve"
             }
         )
     
     # RAG 핵심 흐름
     workflow.add_edge("retrieval_node", "augmentation_node")
-    workflow.add_edge("augmentation_node", "generation_node")
+    
+    # augmentation_node 후 문서 존재 여부 확인
+    # 문서가 없고 원래 경로가 vectorstore면 web_search로 전환
+    if "web_search" in nodes_dict:
+        workflow.add_conditional_edges(
+            "augmentation_node",
+            decide_document_availability,
+            {
+                "generation_node": "generation_node",
+                "web_search": "web_search"
+            }
+        )
+    else:
+        # web_search 노드가 없으면 그냥 진행
+        workflow.add_edge("augmentation_node", "generation_node")
     
     # 답변 정리 노드 추가
     if "answer_refinement_node" in nodes_dict:

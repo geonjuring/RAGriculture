@@ -9,17 +9,18 @@ from .models import GraphState, LLMJudgeScores
 from .config import debug_print
 from .utils import get_current_question, preserve_state_fields, get_current_image, format_docs
 from .error_handler import robust_error_handling, ErrorType
-from .location import get_location_context
+from .location import get_location_context, get_farm_info
 from .image import image_classification_model, image_classification_processor, all_classes
 
 
 # 노드 함수들은 전역 변수에 의존하므로 초기화 함수 필요
 def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker_func=None, 
                      question_router=None, question_validator=None, web_search_tool=None,
-                     image_route_router=None):
+                     image_route_router=None, weather_manager=None, pest_predictor=None):
     """노드 함수들을 초기화하는 함수 (전역 변수 설정)"""
     global _rag_pipeline, _llm, _crop_retrievers, _reranker, _free_reranker
     global _question_router, _question_validator, _web_search_tool, _image_route_router
+    global _weather_manager, _pest_predictor
     
     _rag_pipeline = rag_pipeline
     _llm = llm
@@ -30,6 +31,8 @@ def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker
     _question_validator = question_validator
     _web_search_tool = web_search_tool
     _image_route_router = image_route_router
+    _weather_manager = weather_manager
+    _pest_predictor = pest_predictor
 
 
 # 전역 변수 (initialize_nodes로 설정됨)
@@ -42,6 +45,8 @@ _question_router = None
 _question_validator = None
 _web_search_tool = None
 _image_route_router = None
+_weather_manager = None
+_pest_predictor = None
 
 def retrieval_node(state: GraphState) -> GraphState:
     """검색 노드 - RAG의 핵심"""
@@ -129,11 +134,85 @@ def generation_node(state: GraphState) -> GraphState:
     context = state["context"]
     
     try:
+        # 현재 날짜 정보 가져오기
+        from datetime import datetime
+        current_date = datetime.now()
+        current_date_str = current_date.strftime("%Y년 %m월 %d일")
+        current_month = current_date.month
+        current_season = ""
+        if current_month in [12, 1, 2]:
+            current_season = "겨울"
+        elif current_month in [3, 4, 5]:
+            current_season = "봄"
+        elif current_month in [6, 7, 8]:
+            current_season = "여름"
+        elif current_month in [9, 10, 11]:
+            current_season = "가을"
+        
+        date_context = f"📅 현재 날짜: {current_date_str} ({current_season})"
+        
+        # 위치 컨텍스트
         location_context = get_location_context()
+        
+        # 기상 데이터 컨텍스트 추가
+        weather_context = ""
+        pest_forecast_context = ""
+        
+        farm_info = get_farm_info()
+        if farm_info and _weather_manager:
+            latitude = farm_info.get('latitude')
+            longitude = farm_info.get('longitude')
+            
+            if latitude and longitude:
+                # 기상 컨텍스트 (질문에서 날짜 추출하여 적절한 데이터 사용)
+                weather_context = _weather_manager.get_weather_for_date(
+                    latitude, longitude, question=question
+                )
+                
+                # 병해충 예측 컨텍스트 (질문에서 작물 추출)
+                if _pest_predictor:
+                    # 질문에서 작물명 추출
+                    question_lower = question.lower()
+                    crop = None
+                    growth_stage = "생육기"  # 기본값
+                    
+                    if "토마토" in question or "tomato" in question_lower:
+                        crop = "토마토"
+                    elif "딸기" in question or "strawberry" in question_lower:
+                        crop = "딸기"
+                    
+                    # 생육 단계 추출 (선택사항)
+                    if "개화" in question or "개화기" in question:
+                        growth_stage = "개화기"
+                    elif "착과" in question or "착과기" in question:
+                        growth_stage = "착과기"
+                    elif "수확" in question or "수확기" in question:
+                        growth_stage = "수확기"
+                    
+                    if crop:
+                        pest_forecast_context = _pest_predictor.get_pest_forecast_context(
+                            latitude, longitude, crop, growth_stage
+                        )
+        
+        # 컨텍스트 통합
+        enhanced_context = context
+        # 날짜 정보를 맨 앞에 추가
+        enhanced_context = f"{date_context}\n\n{enhanced_context}"
         if location_context and "경작지 위치 정보가 설정되지 않았습니다" not in location_context:
-            enhanced_context = f"{context}\n\n{location_context}"
-        else:
-            enhanced_context = context
+            enhanced_context = f"{enhanced_context}\n\n{location_context}"
+        if weather_context:
+            enhanced_context = f"{enhanced_context}\n\n{weather_context}"
+            debug_print(f"✅ 기상 컨텍스트 추가됨: {weather_context[:100]}...")
+        if pest_forecast_context:
+            enhanced_context = f"{enhanced_context}\n\n{pest_forecast_context}"
+            debug_print(f"✅ 병해충 예측 컨텍스트 추가됨: {pest_forecast_context[:100]}...")
+        
+        # 디버그: 최종 컨텍스트 확인
+        if weather_context or pest_forecast_context:
+            debug_print(f"📊 통합된 컨텍스트 길이: {len(enhanced_context)} 문자")
+            debug_print(f"📊 기상 정보 포함 여부: {'✅' if weather_context else '❌'}")
+            debug_print(f"📊 병해충 예측 포함 여부: {'✅' if pest_forecast_context else '❌'}")
+        debug_print(f"📅 현재 날짜 정보 추가됨: {current_date_str} ({current_season})")
 
 
         if _rag_pipeline is None or _rag_pipeline.rag_chain is None:
