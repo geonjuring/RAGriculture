@@ -2,6 +2,7 @@
 메인 실행 모듈
 RAG 시스템 통합 및 실행 함수
 """
+import os
 from typing import Dict, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -12,6 +13,8 @@ from .prompts import setup_llm_and_prompts
 from .nodes import initialize_nodes
 from .workflow import create_workflow
 from .location import get_location_context
+from .weather_forecast import WeatherForecastManager
+from .pest_forecast import PestForecastPredictor
 
 
 def initialize_rag_system():
@@ -43,12 +46,41 @@ def initialize_rag_system():
     debug_print("🌐 웹 검색 도구 설정 중...")
     web_search_tool = setup_web_search_tool()
     
-    # 6. RAG 파이프라인 설정 (하이브리드 검색 제거)
+    # 6. 기상 예보 및 병해충 예측 모듈 초기화
+    debug_print("🌤️ 기상 예보 모듈 초기화 중...")
+    weather_manager = None
+    pest_predictor = None
+    try:
+        # 기상 예보 매니저 초기화
+        weather_manager = WeatherForecastManager()
+        debug_print("✅ 기상 예보 모듈 초기화 완료")
+        
+        pest_predictor = PestForecastPredictor(weather_manager, crop_retrievers)
+        debug_print("✅ 병해충 예측 모듈 초기화 완료")
+        
+        # 벡터스토어에서 병해충 목록 자동 추출 (선택사항)
+        try:
+            debug_print("🔍 벡터스토어에서 병해충 목록 추출 중...")
+            for crop in ["토마토", "딸기"]:
+                pest_info = pest_predictor.get_all_pests_for_crop(crop)
+                debug_print(f"📊 {crop} 병해충 정보:")
+                debug_print(f"   - 예보 기반 예측 가능: {pest_info['total_forecast_pests']}개")
+                debug_print(f"   - 벡터스토어 전체: {pest_info['total_vectorstore_pests']}개")
+                debug_print(f"   - 예측 규칙 누락: {pest_info['missing_count']}개")
+                if pest_info['missing_predictions']:
+                    debug_print(f"   - 누락된 병해충: {', '.join(pest_info['missing_predictions'][:5])}{'...' if len(pest_info['missing_predictions']) > 5 else ''}")
+        except Exception as e:
+            debug_print(f"⚠️ 병해충 목록 추출 실패 (시스템은 정상 작동): {e}")
+    except Exception as e:
+        debug_print(f"⚠️ 기상/병해충 모듈 초기화 실패: {e}")
+        debug_print("💡 기상 데이터 없이 RAG 시스템을 계속 실행합니다.")
+    
+    # 7. RAG 파이프라인 설정 (하이브리드 검색 제거)
     # rag_pipeline을 None으로 설정하여 fallback 모드 사용 (crop_retrievers 직접 사용)
     rag_pipeline = None
     debug_print("📚 RAG 파이프라인: 기본 검색 모드 사용 (벡터스토어 직접 검색)")
     
-    # 7. 노드 함수 초기화
+    # 8. 노드 함수 초기화
     debug_print("🔧 노드 함수 초기화 중...")
     from . import nodes
     nodes.initialize_nodes(
@@ -60,10 +92,12 @@ def initialize_rag_system():
         question_router=prompts.get("question_router"),  # 프롬프트 전달
         question_validator=prompts.get("question_validator"),  # 프롬프트 전달
         web_search_tool=web_search_tool,  # 웹 검색 도구 전달
-        image_route_router=prompts.get("image_route_router")  # 이미지 라우팅 라우터 전달
+        image_route_router=prompts.get("image_route_router"),  # 이미지 라우팅 라우터 전달
+        weather_manager=weather_manager,  # 기상 예보 관리자 전달
+        pest_predictor=pest_predictor  # 병해충 예측 모듈 전달
     )
     
-    # 8. 워크플로우 구성
+    # 9. 워크플로우 구성
     debug_print("🔄 워크플로우 구성 중...")
     nodes_dict = {
         "check_validity": nodes.check_question_validity,
