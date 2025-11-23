@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 
 class RouteQuery(BaseModel):
     """사용자 쿼리를 가장 관련성 높은 데이터 소스로 라우팅하는 데이터 모델"""
-    datasource: Literal["vectorstore", "web_search", "image_analysis"] = Field(
+    datasource: Literal["vectorstore", "web_search"] = Field(
         ...,
         description="""농업 질문을 분석하여 적절한 데이터 소스로 라우팅하세요.
         
@@ -25,11 +25,7 @@ class RouteQuery(BaseModel):
 - 농업과 무관한 일반적인 질문
 - 딸기나 토마토 벡터스토어에 정보가 부족한 질문
 
-**image_analysis 선택 조건:**
-- 이미지가 포함된 질문
-- 이미지에 대한 분석이 필요한 질문
-
-반드시 "vectorstore" 또는 "web_search" 또는 "image_analysis" 중 하나만 선택하세요.""",
+반드시 "vectorstore" 또는 "web_search" 중 하나만 선택하세요.""",
     )
 
 
@@ -241,13 +237,6 @@ class GradeAnswer(BaseModel):
                    "답변이 질문을 직접적으로 해결하면 'yes', 그렇지 않으면 'no'를 반환하세요."
     )
 
-
-class ImageRouteQuery(BaseModel):
-    """Route a user question to the most relevant datasource after image analysis."""
-    datasource: Literal["vectorstore", "web_search"] = Field(
-        ...,
-        description="Given a user question choose to route it to web search, vectorstore.",
-    )
     
 
 class GraphState(TypedDict):

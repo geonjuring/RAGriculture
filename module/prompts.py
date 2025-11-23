@@ -4,6 +4,7 @@ LLM 프롬프트 초기화
 """
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain_core.output_parsers import StrOutputParser
 from .models import RouteQuery, QuestionValidity
 from .config import MODEL_NAME
 
@@ -226,12 +227,33 @@ def setup_llm_and_prompts(llm=None):
 - 컨텍스트와 모순되는 답변은 **절대 금지**합니다
 - 추측이나 일반 지식으로 답변하지 마세요
 
+// ... existing code ...
+
 ### 2. 답변 구조 (체계적)
 다음 순서로 답변을 구성하세요:
 1. **핵심 답변**: 질문에 대한 직접적이고 간결한 답변
 2. **상세 설명**: 컨텍스트 기반 구체적 정보
 3. **실용적 조언**: 단계별 실행 방법
-4. **참조 정보**: 사용된 문서 출처 표시 (가능한 경우)
+
+
+**⚠️ 병해충 관련 질문 시 필수 포함 사항 (매우 중요):**
+- 질문이 병해충 방제, 병해충 진단, 병해충 예방과 관련된 경우, **반드시 다음 정보를 포함**해야 합니다:
+  1. **구체적인 농약명**: 컨텍스트에 나온 농약 이름을 정확히 명시하세요
+     - "등록된 약제" 같은 일반적 표현 대신, 컨텍스트에 나온 실제 농약명을 나열하세요
+     - 예: "카브리오", "오티바", "다코닐에이스" 등
+  2. **농약 사용 시기**: 발병 초기, 예방 시기, 살포 간격 등 구체적 시기
+  3. **농약 사용 방법**: 
+     - 희석비율 (예: 1000배 희석)
+     - 살포량 (예: 10a당 20L)
+     - 살포 방법 (예: 엽면 살포, 관주 등)
+  4. **농약 사용 주의사항**: 
+     - 안전사고 예방
+     - 약제 내성 방지 (교호 처리)
+     - 수확 전 안전기간
+- 컨텍스트에 농약 정보가 있으면 **반드시 포함**하고, **일반적인 표현으로 대체하지 마세요**
+- 컨텍스트에 농약 정보가 없으면, "제공된 문서에는 구체적인 농약 정보가 없습니다. 농촌진흥청 또는 농약 판매처에 문의하시기 바랍니다."라고 명시하세요
+
+// ... existing code ...
 
 ### 3. 전문성과 이해하기 쉬운 표현의 균형
 - **정확한 농업 용어** 사용하되, **일반인도 이해하기 쉽게** 설명하세요
@@ -281,14 +303,14 @@ def setup_llm_and_prompts(llm=None):
 **답변**:
 1. **핵심 답변**: 탄저병 방제를 위한 농약과 사용법
 2. **상세 설명**: 
-   - 사용 가능한 농약: 카브리오, 오티바 등
+   - 사용 가능한 농약: 카브리오, 오티바 등 [구체적인 농약명]
    - 사용 시기: 발병 초기 3일 간격으로 3회 처리
-   - 사용 방법: 엽면 살포
+   - 사용 방법: 엽면 살포 [희석비율, 살포량, 살포방법 등 구체적 방법]
 3. **실용적 조언**:
    - 예방을 위해 정식 전 세균 검사
    - 병 발생 시 즉시 감염 식물 제거
    - 약제 사용 시 등록 약제 확인
-4. **참조**: [출처 정보]
+
 
 ---
 
@@ -383,24 +405,17 @@ def setup_llm_and_prompts(llm=None):
         """),
         ("human", "사용자 질문: {question} \n\n LLM 생성 답변: {generation}"),
     ])
-    
-    image_route_prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert at routing a user question to a vectorstore, web search
-The vectorstore contains documents related to Crop cultivation, pest diagnosis, pesticide and fertilizer(compost)
-Use the vectorstore for questions on these topics.
-Otherwise, use web-search.""",),
-        ("human", "사용자 질문: {question} \n 이미지 분석 결과: {image_result}"),
-    ])
+
 
 
     # LLM 기반 평가를 위한 structured output 체인 생성 (프롬프트와 결합)
-    from .models import GradeDocuments, GradeHallucinations, GradeAnswer, ImageRouteQuery
+    from .models import GradeDocuments, GradeHallucinations, GradeAnswer
     
     # 프롬프트와 structured output을 결합한 체인 생성
     grade_documents_grader = grade_documents_prompt | llm.with_structured_output(GradeDocuments)
     hallucination_grader = hallucination_grader_prompt | llm.with_structured_output(GradeHallucinations)
     answer_grader = answer_grader_prompt | llm.with_structured_output(GradeAnswer)
-    image_route_router = image_route_prompt | llm.with_structured_output(ImageRouteQuery)
+    rag_chain = rag_prompt | llm | StrOutputParser()
 
     return {
         "llm": llm,
@@ -414,7 +429,5 @@ Otherwise, use web-search.""",),
         "grade_documents_grader": grade_documents_grader,
         "hallucination_grader": hallucination_grader,
         "answer_grader": answer_grader,
-        # 이미지 분석 체인
-        "image_route_router": image_route_router,
+        "rag_chain": rag_chain,
     }
-

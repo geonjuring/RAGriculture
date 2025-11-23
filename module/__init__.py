@@ -11,7 +11,6 @@ from .models import (
     GradeDocuments,
     GradeHallucinations,
     GradeAnswer,
-    ImageRouteQuery
 )
 from .config import DEBUG_MODE, MODEL_NAME, debug_print
 from .utils import get_current_question, preserve_state_fields, format_docs
@@ -53,7 +52,6 @@ __all__ = [
     "GradeDocuments",
     "GradeHallucinations",
     "GradeAnswer",
-    "ImageRouteQuery",
     # Config
     "DEBUG_MODE",
     "MODEL_NAME",
@@ -88,4 +86,3 @@ __all__ = [
     "setup_farm_location",
     "get_geo_manager",
 ]
-

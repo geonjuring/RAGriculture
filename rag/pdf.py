@@ -68,7 +68,7 @@ class PDFRetrievalChain:
         self,
         source_uri: Annotated[Union[str, List[str], List[Dict[str, str]]], "PDF 파일 경로 or crop 포함된 리스트"],
         persist_dir: str = "db/crop_vector",
-        k: int = 10,
+        k: int = 20,
         force_rebuild: bool = False,
         llm=None
     ):
