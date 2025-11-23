@@ -2,17 +2,19 @@
 메인 실행 모듈
 RAG 시스템 통합 및 실행 함수
 """
+import os
 from typing import Dict, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_teddynote.messages import random_uuid
 from .config import MODEL_NAME, debug_print
 from .retrieval import setup_all_crop_retrievers, setup_reranker, setup_web_search_tool
-from .metrics import RAGMetrics
 from .prompts import setup_llm_and_prompts
 from .nodes import initialize_nodes
 from .workflow import create_workflow
 from .location import get_location_context
+from .weather_forecast import WeatherForecastManager
+from .pest_forecast import PestForecastPredictor
 
 
 def initialize_rag_system():
@@ -44,23 +46,39 @@ def initialize_rag_system():
     debug_print("🌐 웹 검색 도구 설정 중...")
     web_search_tool = setup_web_search_tool()
     
-    # 6. RAG 파이프라인 설정 (하이브리드 검색 제거)
+    # 6. 기상 예보 및 병해충 예측 모듈 초기화
+    debug_print("🌤️ 기상 예보 모듈 초기화 중...")
+    weather_manager = None
+    pest_predictor = None
+    try:
+        # 기상 예보 매니저 초기화
+        weather_manager = WeatherForecastManager()
+        debug_print("✅ 기상 예보 모듈 초기화 완료")
+        
+        pest_predictor = PestForecastPredictor(weather_manager, crop_retrievers)
+        debug_print("✅ 병해충 예측 모듈 초기화 완료")
+        
+        # 벡터스토어에서 병해충 목록 자동 추출 (선택사항)
+        try:
+            debug_print("🔍 벡터스토어에서 병해충 목록 추출 중...")
+            for crop in ["토마토", "딸기"]:
+                pest_info = pest_predictor.get_all_pests_for_crop(crop)
+                debug_print(f"📊 {crop} 병해충 정보:")
+                debug_print(f"   - 예보 기반 예측 가능: {pest_info['total_forecast_pests']}개")
+                debug_print(f"   - 벡터스토어 전체: {pest_info['total_vectorstore_pests']}개")
+                debug_print(f"   - 예측 규칙 누락: {pest_info['missing_count']}개")
+                if pest_info['missing_predictions']:
+                    debug_print(f"   - 누락된 병해충: {', '.join(pest_info['missing_predictions'][:5])}{'...' if len(pest_info['missing_predictions']) > 5 else ''}")
+        except Exception as e:
+            debug_print(f"⚠️ 병해충 목록 추출 실패 (시스템은 정상 작동): {e}")
+    except Exception as e:
+        debug_print(f"⚠️ 기상/병해충 모듈 초기화 실패: {e}")
+        debug_print("💡 기상 데이터 없이 RAG 시스템을 계속 실행합니다.")
+    
+    # 7. RAG 파이프라인 설정 (하이브리드 검색 제거)
     # rag_pipeline을 None으로 설정하여 fallback 모드 사용 (crop_retrievers 직접 사용)
     rag_pipeline = None
     debug_print("📚 RAG 파이프라인: 기본 검색 모드 사용 (벡터스토어 직접 검색)")
-    
-    # 7. RAG 메트릭스 초기화 (LLM 기반 평가 사용)
-    debug_print("📊 RAG 메트릭스 초기화 중...")
-    rag_metrics = RAGMetrics(
-        embedding_model=embedding_model,
-        llm=llm,
-        grade_documents_grader=prompts.get("grade_documents_grader"),
-        hallucination_grader=prompts.get("hallucination_grader"),
-        answer_grader=prompts.get("answer_grader")
-    )
-    
-    # rag_pipeline이 None이므로 rag_metrics는 별도로 관리
-    # (rag_pipeline이 있을 때만 업데이트)
     
     # 8. 노드 함수 초기화
     debug_print("🔧 노드 함수 초기화 중...")
@@ -74,9 +92,9 @@ def initialize_rag_system():
         question_router=prompts.get("question_router"),  # 프롬프트 전달
         question_validator=prompts.get("question_validator"),  # 프롬프트 전달
         web_search_tool=web_search_tool,  # 웹 검색 도구 전달
-        rag_metrics=rag_metrics,  # RAG 메트릭스 전달
-        image_route_router=prompts.get("image_route_router"),  # 이미지 라우팅 라우터 전달
-        rag_prompt=prompts.get("rag_prompt"),
+        weather_manager=weather_manager,  # 기상 예보 관리자 전달
+        pest_predictor=pest_predictor,  # 병해충 예측 모듈 전달
+        rag_prompt=prompts.get("rag_prompt")  # RAG 프롬프트 전달
     )
     
     # 9. 워크플로우 구성
@@ -91,8 +109,8 @@ def initialize_rag_system():
         "retrieval_node": nodes.retrieval_node,
         "augmentation_node": nodes.augmentation_node,
         "generation_node": nodes.generation_node,
-        "quality_check_node": nodes.quality_check_node,
-        "llm_judge_validation": nodes.llm_judge_validation_node,
+        "answer_refinement_node": nodes.answer_refinement_node,  # 답변 정리 노드 (보강 및 정리만)
+        "llm_judge_node": nodes.llm_judge_node,  # LLM Judge 노드 (품질 평가 및 검증)
         "analyze_image": nodes.analyze_image,
     }
     
@@ -104,7 +122,6 @@ def initialize_rag_system():
         "app": app,
         "llm": llm,
         "embedding_model": embedding_model,
-        "rag_metrics": rag_metrics,
         "crop_retrievers": crop_retrievers,
         "reranker": reranker,
         "web_search_tool": web_search_tool,
@@ -147,9 +164,23 @@ def run_rag_system(question: str, image_path: str = None, config: Dict[str, Any]
     result = app.invoke(inputs, run_config)
     
     # 결과 출력
-    debug_print(f"\n💬 답변:")
-    debug_print("-" * 50)
-    debug_print(result.get("answer", result.get("generation", "답변을 생성할 수 없습니다.")))
+    original_answer = result.get("original_answer", "")
+    refined_answer = result.get("answer", result.get("generation", "답변을 생성할 수 없습니다."))
+    
+    if original_answer and original_answer != refined_answer:
+        # 원본 답변과 보강된 답변 모두 출력
+        debug_print(f"\n📝 원본 RAG 답변:")
+        debug_print("-" * 50)
+        debug_print(original_answer)
+        debug_print("\n" + "=" * 50)
+        debug_print(f"\n✨ 보강된 RAG 답변:")
+        debug_print("-" * 50)
+        debug_print(refined_answer)
+    else:
+        # 정리되지 않은 경우 원본 답변만 출력
+        debug_print(f"\n💬 답변:")
+        debug_print("-" * 50)
+        debug_print(refined_answer)
     
     # 이미지 분석 결과 출력
     if image_path:

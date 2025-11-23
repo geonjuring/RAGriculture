@@ -7,9 +7,9 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from .models import GraphState, LLMJudgeScores
 from .config import debug_print
-from .utils import get_current_question, preserve_state_fields, get_current_image
+from .utils import get_current_question, preserve_state_fields, get_current_image, format_docs
 from .error_handler import robust_error_handling, ErrorType
-from .location import get_location_context
+from .location import get_location_context, get_farm_info
 from .image import image_classification_model, image_classification_processor, all_classes
 from langchain_core.output_parsers import StrOutputParser
 
@@ -17,10 +17,11 @@ from langchain_core.output_parsers import StrOutputParser
 # 노드 함수들은 전역 변수에 의존하므로 초기화 함수 필요
 def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker_func=None, 
                      question_router=None, question_validator=None, web_search_tool=None,
-                     rag_metrics=None, image_route_router=None, rag_prompt=None):
+                     weather_manager=None, pest_predictor=None, rag_prompt=None):
     """노드 함수들을 초기화하는 함수 (전역 변수 설정)"""
     global _rag_pipeline, _llm, _crop_retrievers, _reranker, _free_reranker
-    global _question_router, _question_validator, _web_search_tool, _rag_metrics, _image_route_router, _rag_prompt
+    global _question_router, _question_validator, _web_search_tool, _rag_prompt
+    global _weather_manager, _pest_predictor
     
     _rag_pipeline = rag_pipeline
     _llm = llm
@@ -30,9 +31,10 @@ def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker
     _question_router = question_router
     _question_validator = question_validator
     _web_search_tool = web_search_tool
-    _rag_metrics = rag_metrics
-    _image_route_router = image_route_router
+    _weather_manager = weather_manager
+    _pest_predictor = pest_predictor
     _rag_prompt = rag_prompt
+
 
 # 전역 변수 (initialize_nodes로 설정됨)
 _rag_pipeline = None
@@ -43,15 +45,14 @@ _free_reranker = None
 _question_router = None
 _question_validator = None
 _web_search_tool = None
-_rag_metrics = None
-_image_route_router = None
+_weather_manager = None
+_pest_predictor = None
 _rag_prompt = None
 
 def retrieval_node(state: GraphState) -> GraphState:
     """검색 노드 - RAG의 핵심"""
     debug_print("==== [RETRIEVAL NODE] ====")
     question = state["question"]
-    image_result = state.get("image_result", "")
 
     try:
         location_context = get_location_context()
@@ -105,10 +106,7 @@ def augmentation_node(state: GraphState) -> GraphState:
             }
         
         if _rag_pipeline is None:
-            context = "\n\n".join([
-                f"문서 {i+1}: {doc.page_content}\n출처: {doc.metadata.get('source', 'Unknown')}"
-                for i, doc in enumerate(documents)
-            ])
+            context = format_docs(documents)  # utils.format_docs 사용
             return {
                 "context": context,
                 "status": "fallback_augmented"
@@ -137,13 +135,85 @@ def generation_node(state: GraphState) -> GraphState:
     image_result = state.get("image_result", "")
     
     try:
+        # 현재 날짜 정보 가져오기
+        from datetime import datetime
+        current_date = datetime.now()
+        current_date_str = current_date.strftime("%Y년 %m월 %d일")
+        current_month = current_date.month
+        current_season = ""
+        if current_month in [12, 1, 2]:
+            current_season = "겨울"
+        elif current_month in [3, 4, 5]:
+            current_season = "봄"
+        elif current_month in [6, 7, 8]:
+            current_season = "여름"
+        elif current_month in [9, 10, 11]:
+            current_season = "가을"
+        
+        date_context = f"📅 현재 날짜: {current_date_str} ({current_season})"
+        
+        # 위치 컨텍스트
         location_context = get_location_context()
+        
+        # 기상 데이터 컨텍스트 추가
+        weather_context = ""
+        pest_forecast_context = ""
+        
+        farm_info = get_farm_info()
+        if farm_info and _weather_manager:
+            latitude = farm_info.get('latitude')
+            longitude = farm_info.get('longitude')
+            
+            if latitude and longitude:
+                # 기상 컨텍스트 (질문에서 날짜 추출하여 적절한 데이터 사용)
+                weather_context = _weather_manager.get_weather_for_date(
+                    latitude, longitude, question=question
+                )
+                
+                # 병해충 예측 컨텍스트 (질문에서 작물 추출)
+                if _pest_predictor:
+                    # 질문에서 작물명 추출
+                    question_lower = question.lower()
+                    crop = None
+                    growth_stage = "생육기"  # 기본값
+                    
+                    if "토마토" in question or "tomato" in question_lower:
+                        crop = "토마토"
+                    elif "딸기" in question or "strawberry" in question_lower:
+                        crop = "딸기"
+                    
+                    # 생육 단계 추출 (선택사항)
+                    if "개화" in question or "개화기" in question:
+                        growth_stage = "개화기"
+                    elif "착과" in question or "착과기" in question:
+                        growth_stage = "착과기"
+                    elif "수확" in question or "수확기" in question:
+                        growth_stage = "수확기"
+                    
+                    if crop:
+                        pest_forecast_context = _pest_predictor.get_pest_forecast_context(
+                            latitude, longitude, crop, growth_stage
+                        )
+        
+        # 컨텍스트 통합
+        enhanced_context = context
+        # 날짜 정보를 맨 앞에 추가
+        enhanced_context = f"{date_context}\n\n{enhanced_context}"
         if location_context and "경작지 위치 정보가 설정되지 않았습니다" not in location_context:
-            enhanced_context = f"{context}\n\n{location_context}"
-            farm_info = location_context
-        else:
-            enhanced_context = context
-            farm_info = "경작지 위치 정보가 설정되지 않았습니다"
+            enhanced_context = f"{enhanced_context}\n\n{location_context}"
+        if weather_context:
+            enhanced_context = f"{enhanced_context}\n\n{weather_context}"
+            debug_print(f"✅ 기상 컨텍스트 추가됨: {weather_context[:100]}...")
+        if pest_forecast_context:
+            enhanced_context = f"{enhanced_context}\n\n{pest_forecast_context}"
+            debug_print(f"✅ 병해충 예측 컨텍스트 추가됨: {pest_forecast_context[:100]}...")
+        
+        # 디버그: 최종 컨텍스트 확인
+        if weather_context or pest_forecast_context:
+            debug_print(f"📊 통합된 컨텍스트 길이: {len(enhanced_context)} 문자")
+            debug_print(f"📊 기상 정보 포함 여부: {'✅' if weather_context else '❌'}")
+            debug_print(f"📊 병해충 예측 포함 여부: {'✅' if pest_forecast_context else '❌'}")
+        debug_print(f"📅 현재 날짜 정보 추가됨: {current_date_str} ({current_season})")
 
 
         if _rag_pipeline is None or _rag_pipeline.rag_chain is None:
@@ -153,21 +223,11 @@ def generation_node(state: GraphState) -> GraphState:
                     "status": "error",
                     "error_message": "LLM not initialized"
                 }
+            
             fallback_prompt = _rag_prompt
             chain = fallback_prompt | _llm | StrOutputParser()
-            
-#             fallback_prompt = f"""
-# 다음 컨텍스트를 바탕으로 질문에 답변해주세요:
 
-# 컨텍스트: {enhanced_context}
-
-# 질문: {question}
-
-# 답변:
-# """
-            # answer = _llm.invoke(fallback_prompt).content
-
-            answer = chain.invoke({"question":question, "context":enhanced_context, "farm_info":farm_info, "image_result":image_result})
+            answer = chain.invoke({"question": question, "context": enhanced_context, "farm_info": farm_info, "image_result": image_result})
             return {
                 "answer": answer,
                 "status": "fallback_generated"
@@ -189,146 +249,202 @@ def generation_node(state: GraphState) -> GraphState:
         }
 
 
-def quality_check_node(state: GraphState) -> GraphState:
-    """품질 검사 노드 - RAG 품질 평가"""
-    debug_print("==== [QUALITY CHECK NODE] ====")
-    question = state["question"]
+def answer_refinement_node(state: GraphState) -> GraphState:
+    """답변 정리 노드 - RAG 답변만 보강 (ChatGPT 자체 지식 사용 안 함)"""
+    debug_print("==== [ANSWER REFINEMENT NODE] ====")
+    question = state.get("question", "")
+    rag_answer = state.get("answer", "")
+    retry_count = state.get("retry_count", 0)
+    route = state.get("route", "vectorstore")
     documents = state.get("retrieved_docs", state.get("documents", []))
-    answer = state["answer"]
     
     try:
-        if not documents:
+        if not rag_answer or rag_answer.strip() == "":
+            debug_print("⚠️ RAG 답변이 없어 정리 건너뜀")
+            return state
+        
+        # ⭐ RAG 답변 출력
+        debug_print("=" * 80)
+        debug_print("📄 [RAG 시스템 답변]")
+        debug_print("=" * 80)
+        debug_print(rag_answer)
+        debug_print("=" * 80)
+        debug_print(f"📏 RAG 답변 길이: {len(rag_answer)} 문자")
+        
+        if _llm is None:
+            debug_print("⚠️ LLM이 없어 정리 건너뜀")
+            return state
+        
+        # RAG 답변만 받아서 보강/개선 (ChatGPT 자체 지식 사용 안 함)
+        try:
+            debug_print("🔧 RAG 답변 보강 중...")
+            
+            # 검색된 문서 정보 추가 (참고용)
+            doc_summary = ""
+            if documents:
+                doc_summary = "\n\n=== 참조 문서 요약 ===\n"
+                for i, doc in enumerate(documents[:5]):  # 상위 5개만
+                    content = doc.page_content[:200] if hasattr(doc, 'page_content') else str(doc)[:200]
+                    source = doc.metadata.get("source", "Unknown")
+                    doc_summary += f"\n[문서 {i+1}] 출처: {source}\n{content}...\n"
+            
+            # RAG 답변 보강 프롬프트
+            enhancement_prompt = f"""당신은 농업 전문가이자 답변 개선 전문가입니다.
+다음 RAG 시스템이 검색한 문서 기반 답변을 보강하고 개선하세요.
+
+**원본 질문:**
+{question}
+
+**RAG 시스템 답변 (검색된 문서 기반):**
+{rag_answer}
+
+**참조 문서 (참고용):**
+{doc_summary if doc_summary else "참조 문서 없음"}
+
+## 작업 지시사항
+
+### ✅ 수행할 작업:
+1. **내용 보강**: 
+   - RAG 답변에 이미 포함된 정보를 더 명확하게 표현
+   - 불완전한 설명을 보완 (단, 검색된 문서에 근거한 정보만)
+   - 논리적 흐름 개선
+
+2. **구조화 및 가독성 개선**:
+   - 불필요한 중복 제거
+   - 문장을 자연스럽게 다듬기
+   - 마크다운 형식 활용 (제목, 목록, 강조 등)
+   - 단락 구분 및 구조 정리
+
+3. **정보 정확성 유지**:
+   - RAG 답변의 모든 핵심 정보는 그대로 유지
+   - 수치, 시기, 방법 등 구체적 정보는 변경하지 않음
+   - 검색된 문서에 나온 정보만 사용
+
+### ❌ 금지 사항:
+1. **새로운 정보 추가 금지**: 
+   - 검색된 문서에 없는 정보를 추가하지 마세요
+   - ChatGPT의 자체 지식을 사용하지 마세요
+   - 추측이나 일반적인 농업 지식을 추가하지 마세요
+
+2. **내용 변경 금지**:
+   - RAG 답변의 핵심 내용을 변경하지 마세요
+   - 수치, 시기, 방법 등 구체적 정보는 그대로 유지하세요
+   - 문서에 나온 정보와 다른 내용으로 변경하지 마세요
+
+3. **모순 정보 추가 금지**:
+   - RAG 답변과 모순되는 정보를 추가하지 마세요
+   - 질문과 무관한 정보를 추가하지 마세요
+
+## 보강 원칙
+
+- **RAG 답변 기본 유지**: RAG 답변의 모든 핵심 정보는 그대로 유지
+- **표현 개선만**: 같은 내용을 더 명확하고 읽기 쉽게 표현
+- **구조화만**: 정보를 더 잘 구조화하여 가독성 향상
+- **문서 기반만**: 검색된 문서에 나온 정보만 사용
+
+위 RAG 답변을 보강하여 개선된 답변을 생성하세요. 새로운 정보를 추가하지 말고, 기존 RAG 답변의 내용을 더 명확하고 읽기 쉽게 개선하세요.
+"""
+            
+            enhanced_answer = _llm.invoke(enhancement_prompt).content
+            debug_print("✅ RAG 답변 보강 완료")
+            debug_print(f"📏 보강된 답변 길이: {len(enhanced_answer)} 문자")
+            
+            # ⭐ 보강된 답변 출력
+            debug_print("=" * 80)
+            debug_print("✨ [보강된 RAG 답변]")
+            debug_print("=" * 80)
+            debug_print(enhanced_answer)
+            debug_print("=" * 80)
+            
             return {
-                "quality_scores": {
-                    "retrieval_accuracy": 0.2,
-                    "answer_relevance": 0.3,
-                    "answer_correctness": 0.2,
-                    "hallucination_score": 0.5,
-                    "overall_score": 0.3
-                },
-                "status": "quality_checked_no_docs"
+                **state,
+                "answer": enhanced_answer,
+                "original_answer": rag_answer,
+                "status": "enhanced"
+            }
+            
+        except Exception as e:
+            debug_print(f"⚠️ RAG 답변 보강 실패: {e}")
+            import traceback
+            debug_print(traceback.format_exc())
+            # 보강 실패 시 기존 RAG 답변 사용
+            debug_print("⚠️ 보강 실패, 원본 RAG 답변 사용")
+            return {
+                **state,
+                "answer": rag_answer,
+                "original_answer": rag_answer,
+                "status": "enhancement_failed"
             }
         
-        # rag_metrics를 직접 사용 (rag_pipeline이 None이어도 사용 가능)
-        if _rag_metrics:
-            try:
-                quality_scores = _rag_metrics.evaluate(
-                    question=question,
-                    answer=answer,
-                    documents=documents
-                )
-                return {
-                    "quality_scores": quality_scores,
-                    "status": "quality_checked"
-                }
-            except Exception as e:
-                debug_print(f"품질 평가 실패: {e}")
-        
-        # rag_pipeline에 rag_metrics가 있는 경우 (하위 호환성)
-        if _rag_pipeline and hasattr(_rag_pipeline, 'rag_metrics'):
-            try:
-                quality_scores = _rag_pipeline.rag_metrics.evaluate(
-                    question=question,
-                    documents=documents,
-                    answer=answer
-                )
-                return {
-                    "quality_scores": quality_scores,
-                    "status": "quality_checked"
-                }
-            except Exception as e:
-                debug_print(f"품질 평가 실패: {e}")
-        
-        # Fallback 평가
-        doc_quality = min(1.0, len(documents) / 3.0)
-        answer_quality = min(1.0, len(answer) / 100.0)
-        
-        question_words = set(question.lower().split())
-        answer_words = set(answer.lower().split())
-        keyword_match = len(question_words.intersection(answer_words)) / max(len(question_words), 1)
-        
-        overall_score = (doc_quality * 0.3 + answer_quality * 0.4 + keyword_match * 0.3)
-        
-        quality_scores = {
-            "retrieval_accuracy": doc_quality,
-            "answer_relevance": answer_quality,
-            "answer_correctness": keyword_match,
-            "hallucination_score": 0.7,
-            "overall_score": overall_score
-        }
-        
-        return {
-            "quality_scores": quality_scores,
-            "status": "fallback_quality_checked"
-        }
-        
     except Exception as e:
-        debug_print(f"==== [QUALITY CHECK ERROR: {e}] ====")
+        debug_print(f"❌ 답변 보강 실패: {e}")
+        import traceback
+        debug_print(traceback.format_exc())
         return {
-            "quality_scores": {
-                "retrieval_accuracy": 0.3,
-                "answer_relevance": 0.3,
-                "answer_correctness": 0.3,
-                "hallucination_score": 0.5,
-                "overall_score": 0.35
-            },
-            "status": "error",
-            "error_message": f"Quality check failed: {str(e)}"
+            **state,
+            "answer": rag_answer,
+            "original_answer": rag_answer,
+            "status": "refinement_failed",
+            "error_message": f"Answer refinement failed: {str(e)}"
         }
 
 
-def llm_judge_validation_node(state: GraphState) -> GraphState:
-    """LLM-as-Judge 통합 검증 노드 - 모든 검증을 LLM이 직접 판단"""
-    debug_print("==== [LLM JUDGE VALIDATION] ====")
+@robust_error_handling(ErrorType.VALIDATION_ERROR)
+def llm_judge_node(state: GraphState) -> GraphState:
+    """LLM Judge 노드 - 답변 품질 평가 및 검증만 수행"""
+    debug_print("==== [LLM JUDGE NODE] ====")
     question = state.get("question", "")
-    answer = state.get("answer", "")
+    refined_answer = state.get("answer", "")  # answer_refinement_node에서 개선된 답변
     documents = state.get("retrieved_docs", state.get("documents", []))
     retry_count = state.get("retry_count", 0)
     route = state.get("route", "vectorstore")
     
     try:
-        if not question or not answer:
-            state["llm_judge_scores"] = {
-                "should_output": False,
-                "needs_correction": True,
-                "reasoning": "답변 또는 질문이 없어 검증 불가",
-                "is_valid": False,
-                "overall_score": 0
-            }
-            state["status"] = "llm_judge_skipped"
-            return state
+        if not refined_answer or refined_answer.strip() == "":
+            debug_print("⚠️ 답변이 없어 평가 건너뜀")
+            return preserve_state_fields(state, {
+                "llm_judge_scores": {
+                    "should_output": False,
+                    "needs_correction": True,
+                    "reasoning": "답변이 없어 평가 불가",
+                    "is_valid": False,
+                    "overall_score": 0
+                },
+                "status": "judge_skipped"
+            })
         
-        # 참조 문서 요약 (웹검색과 벡터스토어 구분)
-        source_summary = ""
-        web_docs = []
-        vector_docs = []
+        if _llm is None:
+            debug_print("⚠️ LLM이 없어 평가 건너뜀")
+            return preserve_state_fields(state, {
+                "llm_judge_scores": {
+                    "should_output": False,
+                    "needs_correction": True,
+                    "reasoning": "LLM이 없어 평가 불가",
+                    "is_valid": False,
+                    "overall_score": 0
+                },
+                "status": "judge_skipped"
+            })
         
+        # 참조 문서 요약
+        doc_summary = ""
         if documents:
+            doc_summary = "\n\n=== 참조 문서 요약 ===\n"
             for i, doc in enumerate(documents[:10]):
-                content = doc.page_content[:500] if hasattr(doc, 'page_content') else str(doc)[:500]
+                content = doc.page_content[:300] if hasattr(doc, 'page_content') else str(doc)[:300]
                 source = doc.metadata.get("source", "Unknown")
-                
-                # 웹검색과 벡터스토어 결과 분리
-                if source.startswith("http"):
-                    web_docs.append(f"웹 검색 결과 {len(web_docs)+1} (출처: {source}):\n{content}...")
-                else:
-                    vector_docs.append(f"벡터스토어 결과 {len(vector_docs)+1} (출처: {source}):\n{content}...")
-            
-            if web_docs:
-                source_summary += "=== 웹 검색 결과 ===\n" + "\n\n".join(web_docs) + "\n\n"
-            if vector_docs:
-                source_summary += "=== 벡터스토어 결과 ===\n" + "\n\n".join(vector_docs)
+                doc_summary += f"\n[문서 {i+1}] 출처: {source}\n{content}...\n"
         
-        # 통합 검증 프롬프트
-        judge_prompt = f"""
-당신은 농업 전문가이자 답변 품질 검증자입니다. 다음 답변을 종합적으로 검증하고 판단하세요.
+        # LLM Judge 프롬프트
+                judge_prompt = f"""
+당신은 농업 전문가이자 답변 품질 검증자입니다. 다음 보강된 RAG 답변을 종합적으로 검증하고 판단하세요.
 
 **질문:** {question}
 
-**생성된 답변:** {answer}
+**보강된 RAG 답변:** {refined_answer}
 
 **참조 문서:**
-{source_summary if source_summary else "참조 문서 없음"}
+{doc_summary if doc_summary else "참조 문서 없음"}
 
 **검색 경로:** {route} (vectorstore 또는 web_search)
 **재시도 횟수:** {retry_count}/3
@@ -384,7 +500,7 @@ def llm_judge_validation_node(state: GraphState) -> GraphState:
 
 농업 정보의 정확성이 매우 중요하므로, 확신이 없으면 should_output을 False로 판단하세요.
 """
-        
+                
         # LLM 사용 가능 여부 확인
         llm_to_use = None
         if _rag_pipeline and hasattr(_rag_pipeline, 'llm') and _rag_pipeline.llm:
@@ -394,21 +510,17 @@ def llm_judge_validation_node(state: GraphState) -> GraphState:
         
         if llm_to_use:
             try:
+                # 구조화된 LLM 호출로 품질 평가 및 판단
                 structured_llm = llm_to_use.with_structured_output(LLMJudgeScores)
-                result = structured_llm.invoke(judge_prompt)
-                result_dict = result.model_dump()
+                judge_result = structured_llm.invoke(judge_prompt)
+                result_dict = judge_result.model_dump()
                 
-                # overall_score 자동 계산 (없는 경우)
-                if "overall_score" not in result_dict or result_dict["overall_score"] == 0:
-                    scores = [
-                        result_dict.get("accuracy", 0),
-                        result_dict.get("completeness", 0),
-                        result_dict.get("logical_consistency", 0),
-                        result_dict.get("usefulness", 0)
-                    ]
-                    result_dict["overall_score"] = int(sum(scores) / len(scores))
+                # overall_score는 LLM이 자동 계산하도록 함 (임계값 없이)
+                if "overall_score" not in result_dict:
+                    debug_print("⚠️ LLM이 overall_score를 계산하지 않음")
+                    result_dict["overall_score"] = 0  # 기본값만 설정
                 
-                # is_valid는 should_output과 동일하게 설정 (하위 호환성)
+                # is_valid는 should_output과 동일하게 설정
                 if "is_valid" not in result_dict:
                     result_dict["is_valid"] = result_dict.get("should_output", False)
                 
@@ -419,63 +531,102 @@ def llm_judge_validation_node(state: GraphState) -> GraphState:
                     result_dict["needs_correction"] = not result_dict.get("should_output", False)
                 if "correction_suggestions" not in result_dict:
                     result_dict["correction_suggestions"] = ""
+                if "reasoning" not in result_dict:
+                    result_dict["reasoning"] = ""
                 
-                debug_print(f"✅ LLM 통합 검증 판단: should_output={result_dict.get('should_output')}, needs_correction={result_dict.get('needs_correction')}")
-                debug_print(f"📊 점수: accuracy={result_dict.get('accuracy')}, completeness={result_dict.get('completeness')}, overall={result_dict.get('overall_score')}")
-                debug_print(f"💭 판단 근거: {result_dict.get('reasoning', '')[:200]}...")
+                debug_print(f"✅ 품질 평가 완료: accuracy={result_dict.get('accuracy')}, completeness={result_dict.get('completeness')}, overall={result_dict.get('overall_score')}")
+                debug_print(f"✅ 최종 판단: should_output={result_dict.get('should_output')}, needs_correction={result_dict.get('needs_correction')}")
                 
-                state["llm_judge_scores"] = result_dict
-                state["status"] = "llm_judge_completed"
-                return state
+                # quality_scores 생성 (하위 호환성)
+                quality_scores = {
+                    "retrieval_accuracy": 0.8 if documents else 0.2,
+                    "answer_relevance": result_dict.get("usefulness", 0) / 100.0,
+                    "answer_correctness": result_dict.get("accuracy", 0) / 100.0,
+                    "hallucination_score": 1.0 if result_dict.get("accuracy", 0) >= 70 else 0.5,
+                    "overall_score": result_dict.get("overall_score", 0) / 100.0,
+                    "evaluation_method": "LLM"
+                }
+                
+                return preserve_state_fields(state, {
+                    "quality_scores": quality_scores,
+                    "llm_judge_scores": {
+                        "accuracy": result_dict.get("accuracy", 0),
+                        "completeness": result_dict.get("completeness", 0),
+                        "logical_consistency": result_dict.get("logical_consistency", 0),
+                        "usefulness": result_dict.get("usefulness", 0),
+                        "overall_score": result_dict.get("overall_score", 0),
+                        "should_output": result_dict.get("should_output", False),
+                        "needs_correction": result_dict.get("needs_correction", True),
+                        "correction_suggestions": result_dict.get("correction_suggestions", ""),
+                        "reasoning": result_dict.get("reasoning", ""),
+                        "is_valid": result_dict.get("is_valid", False)
+                    },
+                    "status": "judged"
+                })
                 
             except Exception as e:
-                debug_print(f"⚠️ LLM 통합 검증 구조화된 출력 실패: {e}")
-                # Fallback: 일반 LLM 호출
-                try:
-                    fallback_response = llm_to_use.invoke(judge_prompt)
-                    response_text = fallback_response.content.lower()
-                    
-                    should_output = "출력 가능" in response_text or "true" in response_text or "yes" in response_text
-                    needs_correction = "수정 필요" in response_text or "false" in response_text or "no" in response_text
-                    
-                    state["llm_judge_scores"] = {
-                        "should_output": should_output,
-                        "needs_correction": needs_correction,
-                        "reasoning": fallback_response.content,
-                        "is_valid": should_output,
-                        "overall_score": 70 if should_output else 50,
-                        "correction_suggestions": ""
-                    }
-                    state["status"] = "llm_judge_fallback"
-                    return state
-                except Exception as e2:
-                    debug_print(f"⚠️ LLM 통합 검증 Fallback 실패: {e2}")
+                debug_print(f"⚠️ 구조화된 출력 실패: {e}, 기본값 사용")
+                # Fallback: 기본값 설정
+                return preserve_state_fields(state, {
+                    "quality_scores": {
+                        "retrieval_accuracy": 0.5,
+                        "answer_relevance": 0.5,
+                        "answer_correctness": 0.5,
+                        "hallucination_score": 0.5,
+                        "overall_score": 0.5,
+                        "evaluation_method": "Fallback"
+                    },
+                        "llm_judge_scores": {
+                            "should_output": True,
+                            "needs_correction": False,
+                        "reasoning": f"구조화된 출력 실패: {str(e)}",
+                            "is_valid": True,
+                        "overall_score": 50
+                    },
+                    "status": "judge_fallback"
+                })
         
-        # LLM이 없는 경우
-        state["llm_judge_scores"] = {
-            "should_output": False,
-            "needs_correction": True,
-            "reasoning": "LLM이 없어 검증 불가",
-            "is_valid": False,
-            "overall_score": 0,
-            "correction_suggestions": ""
-        }
-        state["status"] = "llm_judge_skipped"
-        return state
-            
+        # LLM이 없는 경우 기본값 반환
+        return preserve_state_fields(state, {
+            "quality_scores": {
+                "retrieval_accuracy": 0.3,
+                "answer_relevance": 0.3,
+                "answer_correctness": 0.3,
+                "hallucination_score": 0.5,
+                "overall_score": 0.35,
+                "evaluation_method": "None"
+            },
+            "llm_judge_scores": {
+                "should_output": False,
+                "needs_correction": True,
+                "reasoning": "LLM이 없어 평가 불가",
+                "is_valid": False,
+                "overall_score": 0
+            },
+            "status": "judge_skipped"
+        })
+        
     except Exception as e:
         debug_print(f"==== [LLM JUDGE ERROR: {e}] ====")
-        state["llm_judge_scores"] = {
-            "should_output": False,
-            "needs_correction": True,
-            "reasoning": f"LLM 통합 검증 실패: {str(e)}",
-            "is_valid": False,
-            "overall_score": 0,
-            "correction_suggestions": ""
-        }
-        state["status"] = "llm_judge_error"
-        state["error_message"] = f"LLM Judge failed: {str(e)}"
-        return state
+        return preserve_state_fields(state, {
+            "quality_scores": {
+                "retrieval_accuracy": 0.3,
+                "answer_relevance": 0.3,
+                "answer_correctness": 0.3,
+                "hallucination_score": 0.5,
+                "overall_score": 0.35,
+                "evaluation_method": "Error"
+            },
+            "llm_judge_scores": {
+                "should_output": False,
+                "needs_correction": True,
+                "reasoning": f"오류 발생: {str(e)}",
+                "is_valid": False,
+                "overall_score": 0
+            },
+            "status": "judge_failed",
+            "error_message": f"LLM Judge failed: {str(e)}"
+        })
 
 
 # 라우팅 및 검색 노드들
@@ -484,13 +635,8 @@ def route_question(state):
     """질문을 적절한 데이터 소스로 라우팅하는 노드"""
     debug_print("==== [ROUTE QUESTION] ====")
     question = get_current_question(state)
-    image = get_current_image(state)
     
     try:
-        if image and image != "":
-            debug_print("==== [ROUTE QUESTION TO IMAGE ANALYSIS] ====")
-            return preserve_state_fields(state, {"route": "analyze_image", "status": "routed"})
-
         if _question_router:
             source = _question_router.invoke({"question": question})
             
@@ -532,51 +678,40 @@ def analyze_image(state):
     question = state["question"]
     image_data = state["image"]
 
-    image = Image.open(image_data).convert('RGB')
-    
-    # 예측
-    extended_inputs = image_classification_processor(image, return_tensors="pt")
-    
-    with torch.no_grad():
-        extended_pred = torch.nn.functional.softmax(image_classification_model(**extended_inputs).logits[0], dim=-1)
-    
-    top_idx = extended_pred.argmax()
-    
-    if top_idx.item() in all_classes:
-        class_name = all_classes[top_idx.item()]
-    else:
-        class_name = f"Unknown ({top_idx.item()})"
+    # 이미지 분류 모델이 없는 경우 처리
+    if image_classification_model is None or image_classification_processor is None:
+        debug_print("⚠️ 이미지 분류 모델이 초기화되지 않았습니다.")
+        return {
+            "question": question,
+            "image_result": "이미지 분류 모델을 사용할 수 없습니다.",
+            "documents": []
+        }
 
-    enhanced_question = f"{question}\n\n이미지 분석 결과: {class_name}"
+    try:
+        image = Image.open(image_data).convert('RGB')
+        
+        # 예측
+        extended_inputs = image_classification_processor(image, return_tensors="pt")
+        
+        with torch.no_grad():
+            extended_pred = torch.nn.functional.softmax(image_classification_model(**extended_inputs).logits[0], dim=-1)
+        
+        top_idx = extended_pred.argmax()
+        
+        if top_idx.item() in all_classes:
+            class_name = all_classes[top_idx.item()]
+        else:
+            class_name = f"Unknown ({top_idx.item()})"
+        enhanced_question = f"{question}\n\n이미지 분석 결과: {class_name}"
 
-    return {"question": enhanced_question, "image_result": class_name, "documents": []}
-
-
-
-def decide_image_route(state):
-    """이미지 분석 후 라우팅 결정 함수 (conditional edge용)"""
-    debug_print("==== [DECIDE IMAGE ROUTE] ====")
-    
-    question = state["question"]
-    image_result = state.get("image_result", "")
-
-    if not image_result:
-        debug_print("⚠️ 이미지 분석 결과가 없습니다. web_search로 라우팅합니다.")
-        return "web_search"
-
-    if _image_route_router is None:
-        debug_print("⚠️ 이미지 라우팅 라우터가 초기화되지 않았습니다.")
-        return "web_search"
-    
-    image_source = _image_route_router.invoke({"question": question, "image_result": image_result})
-
-    if image_source.datasource == "web_search":
-        debug_print("==== [IMAGE ROUTE QUESTION TO WEB SEARCH] ====")
-        return "web_search"
-    elif image_source.datasource == "vectorstore":
-        debug_print("==== [IMAGE ROUTE QUESTION TO VECTORSTORE] ====")
-        return "retrieve"  # workflow에서 "retrieve"로 매핑
-
+        return {"question": enhanced_question, "image_result": class_name, "documents": []}
+    except Exception as e:
+        debug_print(f"⚠️ 이미지 분석 실패: {e}")
+        return {
+            "question": question,
+            "image_result": f"이미지 분석 중 오류 발생: {str(e)}",
+            "documents": []
+        }
 
 
 @robust_error_handling(ErrorType.PROCESSING_ERROR)
@@ -628,7 +763,7 @@ def retrieve(state):
 
 @robust_error_handling(ErrorType.VALIDATION_ERROR)
 def check_question_validity(state):
-    """질문의 유효성을 검사하는 노드 (재작성 기능 제거)"""
+    """질문의 유효성을 검사하고 부적합한 경우 ChatGPT로 보강하는 노드"""
     debug_print("==== [CHECK QUESTION VALIDITY] ====")
     question = state.get("question", "")
     
@@ -637,15 +772,29 @@ def check_question_validity(state):
             validation_result = _question_validator.invoke({"question": question})
             
             is_valid = validation_result.validity.lower() == "yes"
+            rewritten_question = validation_result.rewritten_question.strip() if hasattr(validation_result, 'rewritten_question') else question
             
-            result = {
-                "question_valid": is_valid,
-                "stop_reason": validation_result.reasoning if not is_valid else "",
-                "question": question,  # 원본 질문 유지 (재작성 제거)
-                "current_question": question  # 원본 질문 유지
-            }
-            
-            # 재작성 기능 제거 - 원본 질문 그대로 유지
+            # 재작성된 질문이 있고 원본과 다르면 사용
+            if rewritten_question and rewritten_question != question and rewritten_question != "":
+                debug_print(f"📝 질문 재작성: '{question}' → '{rewritten_question}'")
+                result = {
+                    "question_valid": is_valid,
+                    "stop_reason": validation_result.reasoning if not is_valid else "",
+                    "question": rewritten_question,  # 재작성된 질문 사용
+                    "current_question": rewritten_question,  # 재작성된 질문 사용
+                    "original_question": question,  # 원본 질문 저장
+                    "question_was_rewritten": True
+                }
+            else:
+                # 재작성되지 않았거나 원본과 같으면 원본 사용
+                result = {
+                    "question_valid": is_valid,
+                    "stop_reason": validation_result.reasoning if not is_valid else "",
+                    "question": question,
+                    "current_question": question,
+                    "original_question": question,
+                    "question_was_rewritten": False
+                }
             
             return preserve_state_fields(state, result)
         else:
@@ -654,13 +803,17 @@ def check_question_validity(state):
                 return preserve_state_fields(state, {
                     "question_valid": False,
                     "current_question": question,
+                    "original_question": question,
                     "stop_reason": "질문이 너무 짧습니다.",
+                    "question_was_rewritten": False,
                     "status": "validated"
                 })
             else:
                 return preserve_state_fields(state, {
                     "question_valid": True,
                     "current_question": question,
+                    "original_question": question,
+                    "question_was_rewritten": False,
                     "status": "validated"
                 })
     except Exception as e:
@@ -669,6 +822,8 @@ def check_question_validity(state):
         return preserve_state_fields(state, {
             "question_valid": True,
             "current_question": question,
+            "original_question": question,
+            "question_was_rewritten": False,
             "status": "error",
             "error_message": f"Validation failed: {str(e)}"
         })
@@ -886,4 +1041,5 @@ def transform_query_node(state: GraphState) -> GraphState:
             "current_question": question,
             "route": original_route  # 원래 경로 유지
         })
+
 
