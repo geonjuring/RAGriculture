@@ -11,15 +11,16 @@ from .utils import get_current_question, preserve_state_fields, get_current_imag
 from .error_handler import robust_error_handling, ErrorType
 from .location import get_location_context, get_farm_info
 from .image import image_classification_model, image_classification_processor, all_classes
+from langchain_core.output_parsers import StrOutputParser
 
 
 # 노드 함수들은 전역 변수에 의존하므로 초기화 함수 필요
 def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker_func=None, 
                      question_router=None, question_validator=None, web_search_tool=None,
-                     image_route_router=None, weather_manager=None, pest_predictor=None):
+                     weather_manager=None, pest_predictor=None, rag_prompt=None):
     """노드 함수들을 초기화하는 함수 (전역 변수 설정)"""
     global _rag_pipeline, _llm, _crop_retrievers, _reranker, _free_reranker
-    global _question_router, _question_validator, _web_search_tool, _image_route_router
+    global _question_router, _question_validator, _web_search_tool, _rag_prompt
     global _weather_manager, _pest_predictor
     
     _rag_pipeline = rag_pipeline
@@ -30,9 +31,9 @@ def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker
     _question_router = question_router
     _question_validator = question_validator
     _web_search_tool = web_search_tool
-    _image_route_router = image_route_router
     _weather_manager = weather_manager
     _pest_predictor = pest_predictor
+    _rag_prompt = rag_prompt
 
 
 # 전역 변수 (initialize_nodes로 설정됨)
@@ -44,15 +45,14 @@ _free_reranker = None
 _question_router = None
 _question_validator = None
 _web_search_tool = None
-_image_route_router = None
 _weather_manager = None
 _pest_predictor = None
+_rag_prompt = None
 
 def retrieval_node(state: GraphState) -> GraphState:
     """검색 노드 - RAG의 핵심"""
     debug_print("==== [RETRIEVAL NODE] ====")
     question = state["question"]
-    image_result = state.get("image_result", "")
 
     try:
         location_context = get_location_context()
@@ -132,6 +132,7 @@ def generation_node(state: GraphState) -> GraphState:
     debug_print("==== [GENERATION NODE] ====")
     question = state["question"]
     context = state["context"]
+    image_result = state.get("image_result", "")
     
     try:
         # 현재 날짜 정보 가져오기
@@ -223,16 +224,10 @@ def generation_node(state: GraphState) -> GraphState:
                     "error_message": "LLM not initialized"
                 }
             
-            fallback_prompt = f"""
-다음 컨텍스트를 바탕으로 질문에 답변해주세요:
+            fallback_prompt = _rag_prompt
+            chain = fallback_prompt | _llm | StrOutputParser()
 
-컨텍스트: {enhanced_context}
-
-질문: {question}
-
-답변:
-"""
-            answer = _llm.invoke(fallback_prompt).content
+            answer = chain.invoke({"question": question, "context": enhanced_context, "farm_info": farm_info, "image_result": image_result})
             return {
                 "answer": answer,
                 "status": "fallback_generated"
@@ -640,13 +635,8 @@ def route_question(state):
     """질문을 적절한 데이터 소스로 라우팅하는 노드"""
     debug_print("==== [ROUTE QUESTION] ====")
     question = get_current_question(state)
-    image = get_current_image(state)
     
     try:
-        if image and image != "":
-            debug_print("==== [ROUTE QUESTION TO IMAGE ANALYSIS] ====")
-            return preserve_state_fields(state, {"route": "analyze_image", "status": "routed"})
-
         if _question_router:
             source = _question_router.invoke({"question": question})
             
@@ -712,7 +702,6 @@ def analyze_image(state):
             class_name = all_classes[top_idx.item()]
         else:
             class_name = f"Unknown ({top_idx.item()})"
-
         enhanced_question = f"{question}\n\n이미지 분석 결과: {class_name}"
 
         return {"question": enhanced_question, "image_result": class_name, "documents": []}
@@ -723,33 +712,6 @@ def analyze_image(state):
             "image_result": f"이미지 분석 중 오류 발생: {str(e)}",
             "documents": []
         }
-
-
-
-def decide_image_route(state):
-    """이미지 분석 후 라우팅 결정 함수 (conditional edge용)"""
-    debug_print("==== [DECIDE IMAGE ROUTE] ====")
-    
-    question = state["question"]
-    image_result = state.get("image_result", "")
-
-    if not image_result:
-        debug_print("⚠️ 이미지 분석 결과가 없습니다. web_search로 라우팅합니다.")
-        return "web_search"
-
-    if _image_route_router is None:
-        debug_print("⚠️ 이미지 라우팅 라우터가 초기화되지 않았습니다.")
-        return "web_search"
-    
-    image_source = _image_route_router.invoke({"question": question, "image_result": image_result})
-
-    if image_source.datasource == "web_search":
-        debug_print("==== [IMAGE ROUTE QUESTION TO WEB SEARCH] ====")
-        return "web_search"
-    elif image_source.datasource == "vectorstore":
-        debug_print("==== [IMAGE ROUTE QUESTION TO VECTORSTORE] ====")
-        return "retrieve"  # workflow에서 "retrieve"로 매핑
-
 
 
 @robust_error_handling(ErrorType.PROCESSING_ERROR)
@@ -1079,5 +1041,3 @@ def transform_query_node(state: GraphState) -> GraphState:
             "current_question": question,
             "route": original_route  # 원래 경로 유지
         })
-
-
