@@ -75,12 +75,24 @@ class WeatherForecastManager:
         """현재 시간 기준 base_time 계산 (초단기예보용)"""
         now = datetime.now()
         hour = now.hour
+        minute = now.minute
         
         # 초단기예보는 매시간 정각에 발표 (00, 30분 기준)
-        if now.minute < 30:
+        if minute < 30:
             base_hour = hour - 1 if hour > 0 else 23
         else:
             base_hour = hour
+        
+        # 새벽 시간대(00시~02시) 처리 개선
+        # 새벽 시간대에는 데이터 생성이 지연될 수 있으므로 이전 시간대 사용
+        if hour < 2:
+            # 00시~01시: 전날 23시 사용
+            # 01시~02시: 00시 또는 전날 23시 시도
+            if hour == 0:
+                base_hour = 23
+            elif hour == 1:
+                # 01시 30분 이전이면 전날 23시, 이후면 00시
+                base_hour = 23 if minute < 30 else 0
         
         return f"{base_hour:02d}00"
     
@@ -118,38 +130,62 @@ class WeatherForecastManager:
         }
         
         try:
-            # 공공데이터포털 API 호출
-            # 방법 1: params 사용 (일반적인 방법)
-            response = requests.get(url, params=params, timeout=10)
-            
-            # 403 오류 시 방법 2: serviceKey를 직접 URL에 포함 (인코딩된 키 사용)
-            if response.status_code == 403:
-                debug_print("⚠️ 403 오류 발생, serviceKey를 URL에 직접 포함하여 재시도...")
-                from urllib.parse import urlencode, quote
-                # serviceKey를 제외한 파라미터
-                other_params = {k: v for k, v in params.items() if k != "serviceKey"}
-                # serviceKey를 URL 인코딩하여 직접 포함
-                encoded_key = quote(self.api_key, safe='')
-                query_string = urlencode(other_params)
-                url_with_key = f"{url}?serviceKey={encoded_key}&{query_string}"
-                response = requests.get(url_with_key, timeout=10)
-            
-            response.raise_for_status()
-            
-            # 응답 확인
-            if response.status_code == 200:
-                data = response.json()
-                # API 응답 에러 체크
-                result_code = data.get("response", {}).get("header", {}).get("resultCode", "")
-                if result_code != "00":
+            # 공공데이터포털 API 호출 (최대 2회 재시도)
+            max_retries = 2
+            for retry in range(max_retries):
+                # 방법 1: params 사용 (일반적인 방법)
+                response = requests.get(url, params=params, timeout=10)
+                
+                # 403 오류 시 방법 2: serviceKey를 직접 URL에 포함 (인코딩된 키 사용)
+                if response.status_code == 403:
+                    debug_print("⚠️ 403 오류 발생, serviceKey를 URL에 직접 포함하여 재시도...")
+                    from urllib.parse import urlencode, quote
+                    # serviceKey를 제외한 파라미터
+                    other_params = {k: v for k, v in params.items() if k != "serviceKey"}
+                    # serviceKey를 URL 인코딩하여 직접 포함
+                    encoded_key = quote(self.api_key, safe='')
+                    query_string = urlencode(other_params)
+                    url_with_key = f"{url}?serviceKey={encoded_key}&{query_string}"
+                    response = requests.get(url_with_key, timeout=10)
+                
+                response.raise_for_status()
+                
+                # 응답 확인
+                if response.status_code == 200:
+                    data = response.json()
+                    # API 응답 에러 체크
+                    result_code = data.get("response", {}).get("header", {}).get("resultCode", "")
                     result_msg = data.get("response", {}).get("header", {}).get("resultMsg", "")
-                    debug_print(f"⚠️ API 응답 오류: {result_code} - {result_msg}")
+                    
+                    # NO_DATA 오류(03)인 경우 이전 시간대 시도
+                    if result_code == "03" and retry < max_retries - 1:
+                        debug_print(f"⚠️ API 응답 오류: {result_code} - {result_msg}")
+                        debug_print(f"   이전 시간대 데이터 시도 중... (재시도 {retry + 1}/{max_retries - 1})")
+                        
+                        # 이전 시간대 base_time 계산
+                        current_hour = int(base_time[:2])
+                        prev_hour = (current_hour - 1) % 24
+                        base_time = f"{prev_hour:02d}00"
+                        
+                        # 전날로 넘어가는 경우 base_date도 조정
+                        if prev_hour == 23:
+                            base_date_obj = datetime.strptime(base_date, "%Y%m%d")
+                            base_date_obj = base_date_obj - timedelta(days=1)
+                            base_date = base_date_obj.strftime("%Y%m%d")
+                        
+                        params["base_date"] = base_date
+                        params["base_time"] = base_time
+                        continue
+                    elif result_code != "00":
+                        debug_print(f"⚠️ API 응답 오류: {result_code} - {result_msg}")
+                        return []
+                    
+                    # 성공적으로 데이터를 받은 경우
+                    return self._parse_forecast_data(data, "초단기")
+                else:
+                    debug_print(f"❌ HTTP 오류: {response.status_code}")
+                    debug_print(f"   응답 내용: {response.text[:500]}")
                     return []
-                return self._parse_forecast_data(data, "초단기")
-            else:
-                debug_print(f"❌ HTTP 오류: {response.status_code}")
-                debug_print(f"   응답 내용: {response.text[:500]}")
-                return []
         except requests.exceptions.HTTPError as e:
             debug_print(f"❌ 초단기예보 조회 실패 (HTTP): {e}")
             if hasattr(e, 'response') and e.response is not None:
@@ -178,8 +214,15 @@ class WeatherForecastManager:
         grid_x, grid_y = self._convert_to_grid(latitude, longitude)
         
         url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
-        base_date = datetime.now().strftime("%Y%m%d")
+        now = datetime.now()
+        base_date = now.strftime("%Y%m%d")
         base_time = "0500"  # 05시 기준
+        
+        # 새벽 시간대(00시~05시)에는 전날 0500 데이터 사용
+        if now.hour < 5:
+            base_date_obj = now - timedelta(days=1)
+            base_date = base_date_obj.strftime("%Y%m%d")
+            debug_print(f"📅 새벽 시간대 감지: 전날 데이터 사용 ({base_date} {base_time})")
         
         # serviceKey는 URL 인코딩 필요
         params = {
@@ -194,33 +237,50 @@ class WeatherForecastManager:
         }
         
         try:
-            # 공공데이터포털 API 호출
-            response = requests.get(url, params=params, timeout=10)
-            
-            # 403 오류 시 serviceKey를 URL에 직접 포함하여 재시도
-            if response.status_code == 403:
-                debug_print("⚠️ 403 오류 발생, serviceKey를 URL에 직접 포함하여 재시도...")
-                from urllib.parse import urlencode, quote
-                other_params = {k: v for k, v in params.items() if k != "serviceKey"}
-                encoded_key = quote(self.api_key, safe='')
-                query_string = urlencode(other_params)
-                url_with_key = f"{url}?serviceKey={encoded_key}&{query_string}"
-                response = requests.get(url_with_key, timeout=10)
-            
-            response.raise_for_status()
-            
-            if response.status_code == 200:
-                data = response.json()
-                result_code = data.get("response", {}).get("header", {}).get("resultCode", "")
-                if result_code != "00":
+            # 공공데이터포털 API 호출 (최대 2회 재시도)
+            max_retries = 2
+            for retry in range(max_retries):
+                response = requests.get(url, params=params, timeout=10)
+                
+                # 403 오류 시 serviceKey를 URL에 직접 포함하여 재시도
+                if response.status_code == 403:
+                    debug_print("⚠️ 403 오류 발생, serviceKey를 URL에 직접 포함하여 재시도...")
+                    from urllib.parse import urlencode, quote
+                    other_params = {k: v for k, v in params.items() if k != "serviceKey"}
+                    encoded_key = quote(self.api_key, safe='')
+                    query_string = urlencode(other_params)
+                    url_with_key = f"{url}?serviceKey={encoded_key}&{query_string}"
+                    response = requests.get(url_with_key, timeout=10)
+                
+                response.raise_for_status()
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    result_code = data.get("response", {}).get("header", {}).get("resultCode", "")
                     result_msg = data.get("response", {}).get("header", {}).get("resultMsg", "")
-                    debug_print(f"⚠️ API 응답 오류: {result_code} - {result_msg}")
+                    
+                    # NO_DATA 오류(03)인 경우 이전 날짜 시도
+                    if result_code == "03" and retry < max_retries - 1:
+                        debug_print(f"⚠️ API 응답 오류: {result_code} - {result_msg}")
+                        debug_print(f"   이전 날짜 데이터 시도 중... (재시도 {retry + 1}/{max_retries - 1})")
+                        
+                        # 이전 날짜의 0500 데이터 시도
+                        base_date_obj = datetime.strptime(base_date, "%Y%m%d")
+                        base_date_obj = base_date_obj - timedelta(days=1)
+                        base_date = base_date_obj.strftime("%Y%m%d")
+                        
+                        params["base_date"] = base_date
+                        continue
+                    elif result_code != "00":
+                        debug_print(f"⚠️ API 응답 오류: {result_code} - {result_msg}")
+                        return []
+                    
+                    # 성공적으로 데이터를 받은 경우
+                    return self._parse_forecast_data(data, "단기")
+                else:
+                    debug_print(f"❌ HTTP 오류: {response.status_code}")
+                    debug_print(f"   응답 내용: {response.text[:500]}")
                     return []
-                return self._parse_forecast_data(data, "단기")
-            else:
-                debug_print(f"❌ HTTP 오류: {response.status_code}")
-                debug_print(f"   응답 내용: {response.text[:500]}")
-                return []
         except requests.exceptions.HTTPError as e:
             debug_print(f"❌ 단기예보 조회 실패 (HTTP): {e}")
             if hasattr(e, 'response') and e.response is not None:
