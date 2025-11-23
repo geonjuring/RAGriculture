@@ -46,6 +46,7 @@ from module.weather_forecast import WeatherForecastManager
 from module.pest_forecast import PestForecastPredictor
 from module.error_handler import robust_error_handling, ErrorType
 from module.config import debug_print
+from module.search_history import SearchHistoryManager
 
 
 # LangChain 관련
@@ -66,7 +67,7 @@ pest_predictor = None
 
 def initialize_systems():
     """RAG 시스템 초기화"""
-    global rag_system, rag_app, llm, weather_manager, pest_predictor
+    global rag_system, rag_app, llm, weather_manager, pest_predictor, search_history_manager
     
     if rag_system is None:
         print("🚀 RAG 시스템 초기화 중...")
@@ -85,6 +86,13 @@ def initialize_systems():
             print("✅ 기상/병해충 모듈 초기화 완료 (일정표 검색용)")
         except Exception as e:
             debug_print(f"⚠️ 기상/병해충 모듈 초기화 실패: {e}")
+        
+        # 검색 기록 관리자 초기화
+        try:
+            search_history_manager = SearchHistoryManager(retention_days=30)
+            print("✅ 검색 기록 관리자 초기화 완료")
+        except Exception as e:
+            debug_print(f"⚠️ 검색 기록 관리자 초기화 실패: {e}")
         
         print("✅ RAG 시스템 초기화 완료!")
     
@@ -108,11 +116,15 @@ def fix_markdown_strikethrough(text: str) -> str:
     """마크다운 취소선 문제 해결: 숫자 범위를 올바르게 표시"""
     import re
     
-    # 잘못된 취소선 제거: ~~숫자~~ 패턴을 숫자로 변환 (예: ~~510~~ → 510)
-    # 숫자만 있는 취소선은 잘못된 것으로 간주하고 제거
+    # ⭐ 1단계: 숫자로 시작하는 모든 취소선 제거 (가장 포괄적)
+    # 예: ~~710일 간격으로 23회~~, ~~방제는 710~~, ~~10일마다 3회~~ 등
+    # 숫자로 시작하고 그 뒤에 어떤 문자든 올 수 있는 패턴
+    text = re.sub(r'~~(\d+[^\n~]{0,200}?)~~', r'\1', text)
+    
+    # ⭐ 2단계: 숫자만 있는 취소선 제거 (1단계에서 놓친 경우 대비)
     text = re.sub(r'~~(\d+(?:\.\d+)?)~~', r'\1', text)
     
-    # 소수점과 숫자가 섞인 취소선 패턴 제거 (예: ~~9.510~~ → 9.510)
+    # ⭐ 3단계: 소수점 포함 숫자 취소선 제거
     text = re.sub(r'~~(\d+\.\d+)~~', r'\1', text)
     
     # 4자리 숫자+특수문자 → 2자리~2자리+특수문자 (예: 1015℃ → 10~15℃)
@@ -120,10 +132,6 @@ def fix_markdown_strikethrough(text: str) -> str:
     
     # 4자리 숫자+공백+특수문자 → 2자리~2자리+특수문자 (예: 7080 % → 70~80%)
     text = re.sub(r'(\d{2})(\d{2})\s*([%℃])', r'\1~\2\3', text)
-    
-    # 소수점 포함 숫자 패턴 수정 (예: 9.510일 → 9.5~10일, 단 실제로는 9월 5~10일 의미일 수 있음)
-    # 하지만 이 패턴은 너무 공격적이므로 주석 처리
-    # text = re.sub(r'(\d+)\.(\d{2})(\d{2})(일|월|년|℃|%)', r'\1.\2~\3\4', text)
     
     return text
 
@@ -163,28 +171,21 @@ def rag_query(question: str, image: Optional[Any] = None) -> str:
         if image_result:
             answer = f"**🖼️ 이미지 분석 결과:** {image_result}\n\n" + answer
         
-        # 출처 정보 추가
-        documents = result.get("retrieved_docs", result.get("documents", []))
-        if documents:
-            sources = []
-            for doc in documents[:3]:  # 상위 3개만 표시
-                source = doc.metadata.get('source', 'Unknown')
-                # 파일명만 표시 (경로 제거)
-                if os.path.sep in source:
-                    source = os.path.basename(source)
-                sources.append(f"- {source}")
-            
-            if sources:
-                answer += "\n\n**📚 출처:**\n" + "\n".join(sources)
-        
-        # 품질 점수 표시 (선택사항)
-        quality_scores = result.get("quality_scores", {})
-        if quality_scores and quality_scores.get("overall_score", 0) > 0:
-            overall_score = quality_scores.get("overall_score", 0)
-            answer += f"\n\n**📊 답변 품질 점수:** {overall_score:.2f}/1.00"
-        
         # 마크다운 취소선 문제 해결 (예: 1015℃ → 10~15℃, 7080% → 70~80%)
         answer = fix_markdown_strikethrough(answer)
+        
+        # 검색 기록 저장
+        global search_history_manager
+        if search_history_manager:
+            try:
+                search_history_manager.add_search(
+                    question=question,
+                    answer=answer,
+                    search_type="general",
+                    metadata={"has_image": image_path is not None}
+                )
+            except Exception as e:
+                debug_print(f"⚠️ 검색 기록 저장 실패: {e}")
         
         return answer
     
@@ -287,103 +288,510 @@ def generate_schedule_web_chatgpt(crop: str, location: Optional[str] = None) -> 
 # ============================================================================
 
 def create_gradio_interface():
-    """Gradio 인터페이스 생성"""
+    """Gradio 인터페이스 생성 (심플한 농업 AI 스타일)"""
     
-    with gr.Blocks(title="RAG 시스템", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# 🌾 농업 정보 검색 시스템")
-        gr.Markdown("농업 관련 질문에 대한 전문적인 답변 제공")
-        
+    # 심플한 연두색 계열 테마
+    custom_theme = gr.themes.Soft(
+        primary_hue="green",
+        secondary_hue="lime",
+        neutral_hue="gray",
+    ).set(
+        body_background_fill="#f6f8f4",
+        body_background_fill_dark="#111827",
+        button_primary_background_fill="#4caf50",
+        button_primary_background_fill_hover="#43a047",
+        button_primary_text_color="#ffffff",
+        button_secondary_background_fill="#e8f5e9",
+        button_secondary_background_fill_hover="#c8e6c9",
+        button_secondary_text_color="#2e7d32",
+        border_color_primary="#c5e1a5",
+    )
+
+    
+    # 최대한 단순한 카드 기반 레이아웃
+    custom_css = """
+    .gradio-container {
+        background: #f6f8f4 !important;
+        font-family: 'Pretendard', 'Malgun Gothic', '맑은 고딕', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    }
+
+    /* 전체 폭 약간 줄여서 깔끔하게 */
+    .gradio-container > div {
+        max-width: 1080px;
+        margin: 0 auto;
+    }
+
+    /* 헤더 카드 */
+    .agri-header {
+        background: #ffffff;
+        border-radius: 18px;
+        padding: 18px 22px;
+        border: 1px solid #dde7d2;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+    }
+    .agri-header-left {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+    }
+    .agri-logo-circle {
+        width: 44px;
+        height: 44px;
+        border-radius: 999px;
+        background: #e8f5e9;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 26px;
+    }
+    .agri-title-main {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #1b5e20;
+    }
+    .agri-title-sub {
+        font-size: 0.9rem;
+        color: #5f6f55;
+        margin-top: 4px;
+    }
+    .agri-badge {
+        font-size: 0.78rem;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: #e8f5e9;
+        color: #2e7d32;
+        border: 1px solid #c5e1a5;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+    }
+
+    /* 공통 카드 스타일 */
+    .agri-card {
+        background: #ffffff;
+        border-radius: 16px;
+        border: 1px solid #dde7d2;
+        padding: 14px 16px;
+    }
+    .agri-card + .agri-card {
+        margin-top: 10px;
+    }
+
+    /* 섹션 타이틀 */
+    .agri-section-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #1b5e20;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 6px;
+    }
+    .agri-section-desc {
+        font-size: 0.82rem;
+        color: #5f6f55;
+        margin-bottom: 8px;
+    }
+
+    /* 입력 영역 */
+    .agri-input textarea, .agri-input input {
+        border-radius: 10px !important;
+        border: 1px solid #c5d6bd !important;
+        background: #fbfdf9 !important;
+        font-size: 0.92rem !important;
+    }
+    .agri-input textarea:focus, .agri-input input:focus {
+        border-color: #81c784 !important;
+        box-shadow: 0 0 0 2px rgba(129, 199, 132, 0.25) !important;
+    }
+
+    /* 이미지 업로드 박스 */
+    .agri-image-box {
+        border-radius: 12px !important;
+        border: 1px dashed #a5d6a7 !important;
+        background: #f4faf4 !important;
+    }
+
+    /* 답변 / 팁 카드 */
+    .agri-answer {
+        max-height: 480px;
+        overflow: auto;
+        font-size: 0.9rem;
+        line-height: 1.6;
+    }
+
+    /* 데이터프레임(검색 기록, 일정표) */
+    .dataframe {
+        font-size: 0.82rem;
+    }
+
+    /* 탭 스타일 최소만 수정 */
+    .tabs {
+        margin-top: 18px;
+    }
+
+    /* 푸터 */
+    .agri-footer {
+        font-size: 0.78rem;
+        color: #7b8b6e;
+        text-align: right;
+        margin-top: 22px;
+        padding-bottom: 10px;
+    }
+    """
+
+    with gr.Blocks(title="🌾 RAGriculture - 농업 AI 도우미", theme=custom_theme, css=custom_css) as demo:
+        # 헤더
+        with gr.Row():
+            gr.Markdown(
+                """
+                <div class="agri-header">
+                  <div class="agri-header-left">
+                    <div class="agri-logo-circle">🌾</div>
+                    <div>
+                      <div class="agri-title-main">RAGriculture · 농업 AI 도우미</div>
+                      <div class="agri-title-sub">
+                        작물 진단, 재배 정보, 일정 관리까지 한 번에 확인하세요.
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="agri-badge">
+                      <span>🤖 AI 기반 농업 정보</span>
+                    </div>
+                  </div>
+                </div>
+                """
+            )
+
         with gr.Tabs():
-            # 탭 1: RAG 질문 답변 (이미지 지원)
-            with gr.Tab("🔍 RAG 질문 답변"):
-                gr.Markdown("### 농업 관련 질문을 입력하세요 (이미지 업로드 가능)")
-                gr.Markdown("💡 **새로운 기능**: 작물 이미지를 업로드하면 자동으로 작물을 분류하고 관련 정보를 제공합니다.")
+            # 탭 1: RAG 질문 / 이미지
+            with gr.Tab("💬 농업 Q&A"):
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        q_card = gr.Markdown(
+                            value="""
+                            <div class="agri-card">
+                              <div class="agri-section-title">🌱 농업 관련 질문</div>
+                              <div class="agri-section-desc">
+                                병해, 생육 관리, 양분, 환경 관리 등 궁금한 점을 자유롭게 물어보세요.<br/>
+                                작물 사진을 함께 올리면 이미지 기반 분석도 수행합니다.
+                              </div>
+                            </div>
+                            """,
+                            
+                        )
+
+                        rag_question = gr.Textbox(
+                            label="질문",
+                            placeholder="예) 딸기 탄저병이 의심되는데 방제 방법과 약제 살포 시 주의사항을 알려줘.",
+                            lines=3,
+                            elem_classes=["agri-input", "agri-card"],
+                        )
+
+                        rag_image = gr.Image(
+                            label="작물 이미지 (선택)",
+                            type="filepath",
+                            sources=["upload"],
+                            elem_classes=["agri-image-box", "agri-card"],
+                        )
+
+                        rag_submit_btn = gr.Button("질문하기", variant="primary")
+
+                    with gr.Column(scale=2):
+                        rag_answer = gr.Markdown(
+                            label="답변",
+                            value="질문을 입력하고 `질문하기` 버튼을 눌러주세요.",
+                            elem_classes=["agri-card", "agri-answer"],
+                        )
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        gr.Markdown(
+                            """
+                            <div class="agri-card">
+                              <div class="agri-section-title">📝 사용 팁</div>
+                              <ul style="padding-left:18px; margin:0; font-size:0.82rem; color:#5f6f55;">
+                                <li>가능하면 <strong>작물명 + 증상 + 재배 환경</strong>을 함께 적어주세요.</li>
+                                <li>예) "시설 토마토, 낮에는 30℃ 이상, 잎에 갈색 반점이 생기며 퍼지는 증상"</li>
+                                <li>이미지를 올리면 작물을 자동 분류하고, 해당 작물 기준으로 답변합니다.</li>
+                              </ul>
+                            </div>
+                            """
+                        )
+                    with gr.Column(scale=2):
+                        gr.Markdown(
+                            """
+                            <div class="agri-card">
+                              <div class="agri-section-title">📚 최근 검색 기록</div>
+                              <div class="agri-section-desc">
+                                자주 묻는 질문을 다시 선택해 빠르게 불러올 수 있습니다.
+                              </div>
+                            </div>
+                            """,
+                        )
+                        history_refresh_btn = gr.Button("검색 기록 새로고침", variant="secondary", size="sm")
+                        rag_history = gr.Dataframe(
+                            label="최근 질문",
+                            headers=["시간", "질문"],
+                            interactive=False,
+                            wrap=True,
+                        )
+
+                # ---- 검색 기록 로직 (기존 코드 유지) ----
+                def load_search_history():
+                    """검색 기록 로드"""
+                    global search_history_manager
+                    if not search_history_manager:
+                        return pd.DataFrame()
+                    
+                    try:
+                        records = search_history_manager.get_recent_searches(limit=20, search_type="general")
+                        if not records:
+                            return pd.DataFrame(columns=["시간", "질문"])
+                        
+                        history_data = []
+                        for record in records:
+                            timestamp = record.get('timestamp', '')
+                            try:
+                                dt = datetime.fromisoformat(timestamp)
+                                time_str = dt.strftime('%m/%d %H:%M')
+                            except:
+                                time_str = timestamp[:16]
+                            
+                            question = record.get('question', '')
+                            history_data.append({
+                                "시간": time_str,
+                                "질문": question[:50] + "..." if len(question) > 50 else question
+                            })
+                        
+                        return pd.DataFrame(history_data)
+                    except Exception as e:
+                        debug_print(f"⚠️ 검색 기록 로드 실패: {e}")
+                        return pd.DataFrame(columns=["시간", "질문"])
                 
-                rag_question = gr.Textbox(
-                    label="질문",
-                    placeholder="예: 딸기 탄저병 방제법은?",
-                    lines=3
-                )
-                rag_image = gr.Image(
-                    label="작물 이미지 (선택사항)",
-                    type="filepath",
-                    sources=["upload"],
-                    visible=True
-                )
-                rag_submit_btn = gr.Button("검색", variant="primary")
+                def use_history_record(evt: gr.SelectData):
+                    """검색 기록 선택 시 질문과 답변에 적용"""
+                    if evt.index[0] is not None:
+                        global search_history_manager
+                        if search_history_manager:
+                            try:
+                                records = search_history_manager.get_recent_searches(limit=20, search_type="general")
+                                if evt.index[0] < len(records):
+                                    selected_record = records[evt.index[0]]
+                                    question = selected_record.get('question', '')
+                                    answer = selected_record.get('answer_full') or selected_record.get('answer', '')
+                                    return question, answer
+                            except Exception as e:
+                                debug_print(f"⚠️ 검색 기록 사용 실패: {e}")
+                        return "", ""
+                    return "", ""
                 
-                rag_answer = gr.Markdown(label="답변")
+                history_refresh_btn.click(
+                    fn=load_search_history,
+                    outputs=[rag_history]
+                )
+                
+                rag_history.select(
+                    fn=use_history_record,
+                    outputs=[rag_question, rag_answer]
+                )
+                
+                demo.load(
+                    fn=load_search_history,
+                    outputs=[rag_history]
+                )
                 
                 rag_submit_btn.click(
                     fn=rag_query,
                     inputs=[rag_question, rag_image],
                     outputs=[rag_answer]
+                ).then(
+                    fn=load_search_history,
+                    outputs=[rag_history]
                 )
                 
                 rag_question.submit(
                     fn=rag_query,
                     inputs=[rag_question, rag_image],
                     outputs=[rag_answer]
+                ).then(
+                    fn=load_search_history,
+                    outputs=[rag_history]
                 )
-            
-            # 탭 2: 일정표 생성
-            with gr.Tab("📅 재배 일정표 생성"):
-                gr.Markdown("### 작물별 재배 일정표 생성")
-                
+
+            # 탭 2: 재배 일정표
+            with gr.Tab("📅 재배 일정표"):
                 with gr.Row():
                     with gr.Column(scale=1):
+                        gr.Markdown(
+                            """
+                            <div class="agri-card">
+                              <div class="agri-section-title">📅 작물별 재배 일정표</div>
+                              <div class="agri-section-desc">
+                                현재는 <strong>딸기, 토마토</strong>에 대해 고정된 촉성재배 일정표를 제공합니다.
+                              </div>
+                            </div>
+                            """
+                        )
                         schedule_crop = gr.Dropdown(
                             label="작물 선택",
                             choices=["딸기", "토마토"],
                             value="딸기",
-                            info="재배할 작물을 선택하세요"
+                            info="재배할 작물을 선택하세요.",
                         )
                         schedule_location = gr.Textbox(
-                            label="경작지 위치 (선택사항)",
-                            placeholder="예: 전라남도 순천시 해룡면 신대리",
-                            info="지오코딩을 통해 정확한 위치 정보로 변환됩니다",
-                            lines=2
+                            label="경작지 위치",
+                            placeholder="예) 전라남도 순천시 해룡면 신대리",
+                            info="기상·병해충 정보를 위해 위치 정보가 필요합니다.",
+                            lines=2,
+                            elem_classes=["agri-input"],
                         )
-                        schedule_generate_btn = gr.Button("일정표 생성", variant="primary")
-                        schedule_status = gr.Markdown(value="")
-                    
+                        schedule_generate_btn = gr.Button("일정표 불러오기", variant="primary")
+                        schedule_status = gr.Markdown(value="", elem_classes=["agri-card"])
+
                     with gr.Column(scale=2):
                         schedule_table = gr.Dataframe(
                             label="재배 일정표",
                             headers=["단계", "기간", "주요 작업"],
                             interactive=False,
-                            wrap=True
+                            wrap=True,
                         )
                         schedule_json = gr.JSON(
                             label="일정표 데이터 (JSON)",
                             visible=False
                         )
-                
-                # 상세 작업 검색 섹션
-                gr.Markdown("---")
-                gr.Markdown("### 🔍 상세 작업 검색")
-                gr.Markdown("일정표의 특정 작업에 대한 상세 정보를 검색할 수 있습니다.")
-                
+
+                # 상세 작업 검색
+                gr.Markdown(
+                    """
+                    <div class="agri-card" style="margin-top:10px;">
+                      <div class="agri-section-title">🔍 일정 내 세부 작업 검색</div>
+                      <div class="agri-section-desc">
+                        일정표에서 궁금한 작업(정식, 수확, 환기 관리 등)에 대해 더 자세히 물어보세요.<br/>
+                        위치를 입력하면 해당 지역 기상과 병해충 위험을 반영해 답변합니다.
+                      </div>
+                    </div>
+                    """
+                )
+
                 with gr.Row():
-                    with gr.Column(scale=1):
-                        schedule_task_search = gr.Textbox(
-                            label="작업명 또는 검색어",
-                            placeholder="예: 정식, 수확, 환기 관리, 병해충 방제",
-                            info="일정표의 작업명을 입력하거나 자유롭게 검색어를 입력하세요",
-                            lines=2
-                        )
-                        schedule_search_btn = gr.Button("상세 검색", variant="primary")
-                        schedule_search_info = gr.Markdown(
-                            value="💡 일정표를 먼저 생성한 후 검색하세요.",
-                            visible=True
-                        )
-                    
                     with gr.Column(scale=2):
+                        schedule_task_search = gr.Textbox(
+                            label="검색할 작업/키워드",
+                            placeholder="예) 정식 방법, 수확 시 주의사항, 환기 관리",
+                            lines=2,
+                            elem_classes=["agri-input"],
+                        )
+                        schedule_search_btn = gr.Button("상세 정보 검색", variant="primary")
+                        schedule_search_info = gr.Markdown(
+                            value="💡 먼저 위에서 일정표를 불러온 뒤 검색하세요.",
+                            elem_classes=["agri-card"],
+                        )
                         schedule_search_result = gr.Markdown(
                             label="검색 결과",
-                            value="검색 결과가 여기에 표시됩니다."
+                            value="검색 결과가 여기에 표시됩니다.",
+                            elem_classes=["agri-card", "agri-answer"],
                         )
+                    with gr.Column(scale=1):
+                        gr.Markdown(
+                            """
+                            <div class="agri-card">
+                              <div class="agri-section-title">📜 일정 관련 검색 기록</div>
+                              <div class="agri-section-desc">
+                                일정표와 관련된 이전 검색을 다시 불러올 수 있습니다.
+                              </div>
+                            </div>
+                            """
+                        )
+                        schedule_history_refresh_btn = gr.Button("검색 기록 새로고침", variant="secondary", size="sm")
+                        schedule_history = gr.Dataframe(
+                            label="최근 일정 검색",
+                            headers=["시간", "작물", "질문"],
+                            interactive=False,
+                            wrap=True,
+                        )
+
+                # 일정 검색 기록 로직 (기존 유지)
+                def load_schedule_history():
+                    """일정표 검색 기록 로드"""
+                    global search_history_manager
+                    if not search_history_manager:
+                        return pd.DataFrame()
+                    
+                    try:
+                        records = search_history_manager.get_recent_searches(limit=20, search_type="schedule")
+                        if not records:
+                            return pd.DataFrame(columns=["시간", "작물", "질문"])
+                        
+                        history_data = []
+                        for record in records:
+                            timestamp = record.get('timestamp', '')
+                            try:
+                                dt = datetime.fromisoformat(timestamp)
+                                time_str = dt.strftime('%m/%d %H:%M')
+                            except:
+                                time_str = timestamp[:16]
+                            
+                            crop = record.get('crop', '')
+                            question = record.get('question', '')
+                            if crop and crop in question:
+                                question = question.replace(crop, '').strip()
+                            
+                            history_data.append({
+                                "시간": time_str,
+                                "작물": crop or "-",
+                                "질문": question[:40] + "..." if len(question) > 40 else question
+                            })
+                        
+                        return pd.DataFrame(history_data)
+                    except Exception as e:
+                        debug_print(f"⚠️ 일정표 검색 기록 로드 실패: {e}")
+                        return pd.DataFrame(columns=["시간", "작물", "질문"])
                 
+                def use_schedule_history_record(evt: gr.SelectData):
+                    """일정표 검색 기록 선택 시 검색어와 답변에 적용"""
+                    if evt.index[0] is not None:
+                        global search_history_manager
+                        if search_history_manager:
+                            try:
+                                records = search_history_manager.get_recent_searches(limit=20, search_type="schedule")
+                                if evt.index[0] < len(records):
+                                    selected_record = records[evt.index[0]]
+                                    task_query = selected_record.get('metadata', {}).get('task_query', '')
+                                    if not task_query:
+                                        question = selected_record.get('question', '')
+                                        crop = selected_record.get('crop', '')
+                                        if crop and crop in question:
+                                            task_query = question.replace(crop, '').strip()
+                                        else:
+                                            task_query = question
+                                    answer = selected_record.get('answer_full') or selected_record.get('answer', '')
+                                    return task_query, answer
+                            except Exception as e:
+                                debug_print(f"⚠️ 일정표 검색 기록 사용 실패: {e}")
+                        return "", ""
+                    return "", ""
+                
+                schedule_history_refresh_btn.click(
+                    fn=load_schedule_history,
+                    outputs=[schedule_history]
+                )
+                
+                schedule_history.select(
+                    fn=use_schedule_history_record,
+                    outputs=[schedule_task_search, schedule_search_result]
+                )
+                
+                demo.load(
+                    fn=load_schedule_history,
+                    outputs=[schedule_history]
+                )
+
                 def update_schedule(crop, location):
                     """일정표 생성 및 출력 업데이트"""
                     df, json_data, status_msg = generate_schedule_web_chatgpt(crop, location)
@@ -397,11 +805,14 @@ def create_gradio_interface():
                     if schedule_df is None or schedule_df.empty:
                         return "일정표를 먼저 생성해주세요.", "⚠️ 일정표를 먼저 생성한 후 검색하세요."
                     
+                    # 위치 정보 필수 체크
+                    if not location or not location.strip():
+                        return "위치 정보를 입력해주세요.", "⚠️ 지역별 맞춤형 조언을 위해 경작지 위치 정보가 필수입니다."
+                    
                     try:
-                        # 작물명과 작업명을 결합하여 질문 생성
                         enhanced_question = f"{crop} {task_query.strip()}"
                         
-                        # 위치 정보 설정 (일정표 생성 시 사용한 위치 재사용)
+                        # 위치 정보 설정
                         farm_info_dict = None
                         if location and location.strip():
                             try:
@@ -409,7 +820,6 @@ def create_gradio_interface():
                                 if geo_manager:
                                     result = geo_manager.get_final_address(location.strip(), verbose=False)
                                     if result:
-                                        # road_address가 None이면 legal_address 또는 user_input 사용
                                         road_addr = result['final_address']['road_address']
                                         legal_addr = result['final_address']['legal_address']
                                         display_address = road_addr or legal_addr or location.strip()
@@ -423,196 +833,56 @@ def create_gradio_interface():
                                             'user_input': location.strip()
                                         }
                                         set_farm_info(farm_info_dict)
-                                        debug_print(f"✅ 위치 정보 설정 완료: {display_address}")
-                            except Exception as geo_error:
-                                debug_print(f"⚠️ 지오코딩 실패: {geo_error}")
+                            except Exception as e:
+                                debug_print(f"⚠️ 지오코딩 실패: {e}")
                         
-                        # 기상 데이터 및 병해충 예측 정보 수집
-                        weather_info = ""
-                        pest_info = ""
+                        if not farm_info_dict:
+                            return "위치 정보를 확인할 수 없습니다.", "⚠️ 정확한 주소를 입력해주세요."
                         
+                        # 기상 데이터 수집 및 질문에 포함
+                        current_forecast = None
+                        location_name = None
                         if farm_info_dict and weather_manager:
                             latitude = farm_info_dict.get('latitude')
                             longitude = farm_info_dict.get('longitude')
                             
                             if latitude and longitude:
-                                # 현재 기상 상태
                                 try:
-                                    # 직접 좌표를 사용하여 기상 데이터 가져오기
                                     ultra_short = weather_manager.get_ultra_short_forecast(latitude, longitude)
                                     short = weather_manager.get_short_forecast(latitude, longitude)
                                     
                                     if ultra_short or short:
-                                        # 기온 데이터가 있는 첫 번째 예보 찾기
-                                        current_forecast = None
-                                        
-                                        # 초단기예보에서 기온이 있는 첫 번째 항목 찾기
-                                        if ultra_short:
-                                            for fcst in ultra_short:
+                                        for fcst in (ultra_short or []):
+                                            if fcst.get("temp") is not None:
+                                                current_forecast = fcst
+                                                break
+                                        if not current_forecast and short:
+                                            for fcst in short:
                                                 if fcst.get("temp") is not None:
                                                     current_forecast = fcst
                                                     break
-                                            # 기온이 없으면 첫 번째 항목 사용
-                                            if current_forecast is None and ultra_short:
-                                                current_forecast = ultra_short[0]
-                                        
-                                        # 초단기예보에 기온이 없으면 단기예보에서 찾기
-                                        if current_forecast is None or current_forecast.get("temp") is None:
-                                            if short:
-                                                for fcst in short:
-                                                    if fcst.get("temp") is not None:
-                                                        current_forecast = fcst
-                                                        break
-                                                # 기온이 없으면 첫 번째 항목 사용
-                                                if current_forecast is None and short:
-                                                    current_forecast = short[0]
                                         
                                         if current_forecast:
-                                            # 위치 정보 추출
                                             location_name = farm_info_dict.get('road_address') or farm_info_dict.get('legal_address') or "해당 위치"
                                             
-                                            # 기상 정보 문자열 생성
-                                            weather_info = "## 🌤️ 현재 기상 상태\n\n"
-                                            weather_info += f"📍 **위치**: {location_name}\n\n"
-                                            weather_info += f"🌤️ 현재 기상 조건 ({location_name} 기준):\n"
-                                            
-                                            # 기온 정보를 강조하여 표시
+                                            weather_context = "\n\n[중요: 아래 현재 기상 조건을 반드시 고려하여 해당 지역에 맞는 맞춤형 조언을 제공해주세요]\n"
+                                            weather_context += f"위치: {location_name}\n"
                                             if current_forecast.get("temp") is not None:
-                                                weather_info += f"🌡️ **현재 기온: {current_forecast['temp']}℃**\n"
-                                            
-                                            if current_forecast.get("temp_max") is not None and current_forecast.get("temp_min") is not None:
-                                                weather_info += f"🌡️ **예상 기온 범위: {current_forecast['temp_min']}~{current_forecast['temp_max']}℃**\n"
-                                            
+                                                weather_context += f"현재 기온: {current_forecast.get('temp')}℃\n"
+                                            if current_forecast.get("temp_max") and current_forecast.get("temp_min"):
+                                                weather_context += f"예상 기온 범위: {current_forecast['temp_min']}~{current_forecast['temp_max']}℃\n"
                                             if current_forecast.get("rh"):
-                                                weather_info += f"- 습도: {current_forecast['rh']}%\n"
-                                            
-                                            if current_forecast.get("precipitation"):
-                                                weather_info += f"- 강수량: {current_forecast['precipitation']}\n"
-                                            
+                                                weather_context += f"현재 습도: {current_forecast.get('rh')}%\n"
                                             if current_forecast.get("wind_speed"):
-                                                weather_info += f"- 풍속: {current_forecast['wind_speed']}m/s\n"
-                                            
-                                            if current_forecast.get("sky_condition"):
-                                                weather_info += f"- 하늘 상태: {current_forecast['sky_condition']}\n"
-                                            
-                                            weather_info += "\n"
-                                            
-                                            # 단기 예보 추가 (오늘~3일)
-                                            if short:
-                                                weather_info += "### 📅 단기 예보 (오늘~3일)\n\n"
-                                                # 날짜별로 그룹화
-                                                from collections import defaultdict
-                                                from datetime import datetime
-                                                daily_forecasts = defaultdict(list)
-                                                
-                                                for fcst in short[:15]:  # 상위 15개만
-                                                    fcst_date = fcst.get("fcst_datetime", "")
-                                                    if fcst_date:
-                                                        try:
-                                                            date_obj = datetime.strptime(fcst_date, "%Y%m%d%H%M")
-                                                            date_key = date_obj.strftime("%Y-%m-%d")
-                                                            daily_forecasts[date_key].append(fcst)
-                                                        except:
-                                                            pass
-                                                
-                                                for date_key in sorted(daily_forecasts.keys())[:3]:  # 최대 3일
-                                                    day_forecasts = daily_forecasts[date_key]
-                                                    if day_forecasts:
-                                                        temps = [f.get("temp") for f in day_forecasts if f.get("temp") and f.get("temp") is not None]
-                                                        rh_values = [f.get("rh") for f in day_forecasts if f.get("rh") and f.get("rh") is not None]
-                                                        precip = [f.get("precipitation") for f in day_forecasts if f.get("precipitation")]
-                                                        
-                                                        weather_info += f"**{date_key}**: "
-                                                        if temps:
-                                                            weather_info += f"온도 {min(temps)}~{max(temps)}℃, "
-                                                        if rh_values:
-                                                            weather_info += f"습도 평균 {sum(rh_values)/len(rh_values):.0f}%, "
-                                                        if any(p and p != "0" and "없음" not in str(p) for p in precip):
-                                                            weather_info += "강수 예상, "
-                                                        weather_info = weather_info.rstrip(", ") + "\n"
-                                                
-                                                weather_info += "\n"
-                                        else:
-                                            # current_forecast가 없어도 단기 예보만이라도 표시
-                                            if short:
-                                                weather_info = "## 🌤️ 현재 기상 상태\n\n"
-                                                weather_info += "### 📅 단기 예보 (오늘~3일)\n\n"
-                                                from collections import defaultdict
-                                                from datetime import datetime
-                                                daily_forecasts = defaultdict(list)
-                                                
-                                                for fcst in short[:15]:
-                                                    fcst_date = fcst.get("fcst_datetime", "")
-                                                    if fcst_date:
-                                                        try:
-                                                            date_obj = datetime.strptime(fcst_date, "%Y%m%d%H%M")
-                                                            date_key = date_obj.strftime("%Y-%m-%d")
-                                                            daily_forecasts[date_key].append(fcst)
-                                                        except:
-                                                            pass
-                                                
-                                                for date_key in sorted(daily_forecasts.keys())[:3]:
-                                                    day_forecasts = daily_forecasts[date_key]
-                                                    if day_forecasts:
-                                                        temps = [f.get("temp") for f in day_forecasts if f.get("temp") and f.get("temp") is not None]
-                                                        rh_values = [f.get("rh") for f in day_forecasts if f.get("rh") and f.get("rh") is not None]
-                                                        precip = [f.get("precipitation") for f in day_forecasts if f.get("precipitation")]
-                                                        
-                                                        weather_info += f"**{date_key}**: "
-                                                        if temps:
-                                                            weather_info += f"온도 {min(temps)}~{max(temps)}℃, "
-                                                        if rh_values:
-                                                            weather_info += f"습도 평균 {sum(rh_values)/len(rh_values):.0f}%, "
-                                                        if any(p and p != "0" and "없음" not in str(p) for p in precip):
-                                                            weather_info += "강수 예상, "
-                                                        weather_info = weather_info.rstrip(", ") + "\n"
-                                                
-                                                weather_info += "\n"
+                                                weather_context += f"현재 풍속: {current_forecast.get('wind_speed')}m/s\n"
+                                            if current_forecast.get("precipitation"):
+                                                precip = current_forecast.get("precipitation")
+                                                if precip and precip != "0" and "없음" not in str(precip):
+                                                    weather_context += f"강수량: {precip}\n"
+                                            weather_context += "\n위 기상 조건을 반드시 고려하여 현재 시점과 지역에 맞는 구체적이고 실용적인 조언을 제공해주세요."
+                                            enhanced_question = f"{enhanced_question}{weather_context}"
                                 except Exception as e:
                                     debug_print(f"⚠️ 기상 정보 수집 실패: {e}")
-                                
-                                # 병해충 예측 정보 (작물명이 포함된 경우)
-                                if pest_predictor:
-                                    try:
-                                        # 질문에서 생육 단계 추출
-                                        growth_stage = "생육기"  # 기본값
-                                        task_lower = task_query.lower()
-                                        if "개화" in task_query or "개화기" in task_query:
-                                            growth_stage = "개화기"
-                                        elif "착과" in task_query or "착과기" in task_query:
-                                            growth_stage = "착과기"
-                                        elif "수확" in task_query or "수확기" in task_query:
-                                            growth_stage = "수확기"
-                                        
-                                        pest_context = pest_predictor.get_pest_forecast_context(
-                                            latitude, longitude, crop, growth_stage
-                                        )
-                                        
-                                        if pest_context:
-                                            pest_info = f"## ⚠️ 병해충 예측 정보\n\n{pest_context}\n\n"
-                                            
-                                            # 추가 상세 정보 제공
-                                            forecast = pest_predictor.predict_pest_risk(
-                                                latitude, longitude, crop, growth_stage
-                                            )
-                                            
-                                            if forecast and forecast.get("pest_forecasts"):
-                                                pest_info += "### 📊 상세 예측 정보\n\n"
-                                                
-                                                for pf in forecast.get("pest_forecasts", []):
-                                                    if pf["risk_level"] in ["주의", "경계", "심각"]:
-                                                        pest_info += f"**{pf['pest_name']}** ({pf['forecast_period']})\n"
-                                                        pest_info += f"- 위험도: {pf['risk_level']} (점수: {pf['risk_score']}/3)\n"
-                                                        pest_info += f"- 예상 조건:\n"
-                                                        pest_info += f"  • 연속 고습 시간: {pf['conditions']['max_continuous_humid_hours']}시간\n"
-                                                        pest_info += f"  • 총 강수량: {pf['conditions']['total_rain']}mm\n"
-                                                        if pf['conditions'].get('risk_periods'):
-                                                            pest_info += f"  • 위험 시간대: {pf['conditions']['risk_periods'][0]['start']}\n"
-                                                        pest_info += f"- 권장 조치: {pf['recommendation']}\n\n"
-                                                
-                                                pest_info += "\n"
-                                    except Exception as e:
-                                        debug_print(f"⚠️ 병해충 예측 정보 수집 실패: {e}")
                         
                         # RAG 검색 수행
                         result = run_rag_system(
@@ -622,53 +892,25 @@ def create_gradio_interface():
                         )
                         
                         answer = result.get("answer", result.get("generation", "답변을 생성할 수 없습니다."))
+                        final_answer = fix_markdown_strikethrough(answer)
                         
-                        # 기상 정보 및 병해충 예측 정보를 답변 상단에 추가
-                        final_answer = ""
-                        
-                        # 기상 정보가 있는 경우 표시
-                        if weather_info:
-                            final_answer += weather_info
-                        elif farm_info_dict and weather_manager:
-                            # 기상 정보를 가져오려고 했지만 실패한 경우 안내
-                            final_answer += "## ⚠️ 기상 정보\n\n"
-                            final_answer += "기상 데이터를 가져올 수 없습니다. 다음을 확인해주세요:\n"
-                            final_answer += "- API 키 설정 확인 (`.env` 파일의 `WEATHER_API_KEY`)\n"
-                            final_answer += "- 네트워크 연결 확인\n"
-                            final_answer += "- 기상청 API 서비스 상태 확인\n\n"
-                        
-                        # 병해충 예측 정보가 있는 경우 표시
-                        if pest_info:
-                            final_answer += pest_info
-                        elif farm_info_dict and pest_predictor and (crop in ["토마토", "딸기"]):
-                            # 병해충 예측을 시도했지만 결과가 없는 경우
-                            # (위험도가 낮은 경우이므로 별도 안내 불필요)
-                            pass
-                        
-                        final_answer += "## 💡 작업 상세 정보\n\n" + answer
-                        
-                        # 출처 정보 추가
-                        documents = result.get("retrieved_docs", result.get("documents", []))
-                        if documents:
-                            sources = []
-                            for doc in documents[:3]:  # 상위 3개만 표시
-                                source = doc.metadata.get('source', 'Unknown')
-                                if os.path.sep in source:
-                                    source = os.path.basename(source)
-                                sources.append(f"- {source}")
-                            
-                            if sources:
-                                final_answer += "\n\n**📚 출처:**\n" + "\n".join(sources)
-                        
-                        # 마크다운 취소선 문제 해결
-                        final_answer = fix_markdown_strikethrough(final_answer)
+                        # 검색 기록 저장
+                        global search_history_manager
+                        if search_history_manager:
+                            try:
+                                location_name_for_history = farm_info_dict.get('road_address') or farm_info_dict.get('legal_address') or location
+                                search_history_manager.add_search(
+                                    question=enhanced_question,
+                                    answer=final_answer,
+                                    search_type="schedule",
+                                    location=location_name_for_history,
+                                    crop=crop,
+                                    metadata={"task_query": task_query.strip()}
+                                )
+                            except Exception as e:
+                                debug_print(f"⚠️ 검색 기록 저장 실패: {e}")
                         
                         info_msg = f"✅ '{task_query.strip()}'에 대한 검색 완료"
-                        if weather_info:
-                            info_msg += " (기상 정보 포함)"
-                        if pest_info:
-                            info_msg += " (병해충 예측 포함)"
-                        
                         return final_answer, info_msg
                         
                     except Exception as e:
@@ -676,7 +918,6 @@ def create_gradio_interface():
                         import traceback
                         debug_print(traceback.format_exc())
                         return f"검색 중 오류가 발생했습니다: {str(e)}", "❌ 검색 실패"
-                
                 schedule_generate_btn.click(
                     fn=update_schedule,
                     inputs=[schedule_crop, schedule_location],
@@ -687,31 +928,30 @@ def create_gradio_interface():
                     fn=search_schedule_task,
                     inputs=[schedule_crop, schedule_location, schedule_task_search, schedule_table],
                     outputs=[schedule_search_result, schedule_search_info]
+                ).then(
+                    fn=load_schedule_history,
+                    outputs=[schedule_history]
                 )
                 
                 schedule_task_search.submit(
                     fn=search_schedule_task,
                     inputs=[schedule_crop, schedule_location, schedule_task_search, schedule_table],
                     outputs=[schedule_search_result, schedule_search_info]
+                ).then(
+                    fn=load_schedule_history,
+                    outputs=[schedule_history]
                 )
-            
-        # 푸터
-        gr.Markdown("---")
-        gr.Markdown("### 💡 사용 팁")
-        gr.Markdown("""
-        - **RAG 질문 답변**: 
-          - 농업 관련 모든 질문에 답변할 수 있습니다
-          - 작물 이미지를 업로드하면 자동으로 작물을 분류하고 관련 정보를 제공합니다
-          - 경작지 위치를 입력하면 해당 지역에 맞는 정보를 제공합니다
-          - 질문에 작물명(토마토/딸기)이 포함되면 병해충 위험도 예측 정보도 함께 제공됩니다
-        - **재배 일정표 생성**: 
-          - 딸기와 토마토의 재배 일정표를 조회할 수 있습니다
-          - 일정표 생성 후 "상세 작업 검색" 섹션에서 특정 작업의 상세 정보를 검색할 수 있습니다
-          - 예: 일정표에서 "정식" 작업을 확인한 후, 검색창에 "정식" 또는 "정식 방법"을 입력하여 상세 정보 검색
-          - 경작지 위치를 입력하면 기상 조건을 고려한 맞춤형 조언을 받을 수 있습니다
-        """)
+
+        gr.Markdown(
+            """
+            <div class="agri-footer">
+              🌾 RAGriculture · 농업 데이터를 바탕으로 한 지능형 상담 도우미
+            </div>
+            """
+        )
     
     return demo
+
 
 # ============================================================================
 # 5. 실행
