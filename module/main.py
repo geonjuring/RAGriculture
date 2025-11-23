@@ -92,9 +92,9 @@ def initialize_rag_system():
         question_router=prompts.get("question_router"),  # 프롬프트 전달
         question_validator=prompts.get("question_validator"),  # 프롬프트 전달
         web_search_tool=web_search_tool,  # 웹 검색 도구 전달
-        image_route_router=prompts.get("image_route_router"),  # 이미지 라우팅 라우터 전달
         weather_manager=weather_manager,  # 기상 예보 관리자 전달
-        pest_predictor=pest_predictor  # 병해충 예측 모듈 전달
+        pest_predictor=pest_predictor,  # 병해충 예측 모듈 전달
+        rag_prompt=prompts.get("rag_prompt")  # RAG 프롬프트 전달
     )
     
     # 9. 워크플로우 구성
@@ -218,4 +218,3 @@ def run_rag_system(question: str, image_path: str = None, config: Dict[str, Any]
     debug_print("=" * 80)
     
     return result
-
