@@ -6,8 +6,9 @@ import os
 from typing import Dict, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_teddynote.messages import random_uuid
-from .config import MODEL_NAME, debug_print
+from .config import MODEL_NAME, JUDGE_MODEL_NAME, debug_print
 from .retrieval import setup_all_crop_retrievers, setup_reranker, setup_web_search_tool
 from .prompts import setup_llm_and_prompts
 from .nodes import initialize_nodes
@@ -24,6 +25,18 @@ def initialize_rag_system():
     # 1. LLM 및 임베딩 모델 초기화
     llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
     embedding_model = OpenAIEmbeddings()
+    
+    # Judge LLM 초기화 (Gemini)
+    try:
+        judge_llm = ChatGoogleGenerativeAI(
+            model=JUDGE_MODEL_NAME,
+            temperature=0,
+            convert_system_message_to_human=True
+        )
+        debug_print(f"⚖️ Judge LLM 초기화 완료: {JUDGE_MODEL_NAME}")
+    except Exception as e:
+        debug_print(f"⚠️ Judge LLM 초기화 실패 (기본 LLM 사용): {e}")
+        judge_llm = None
     
     # 2. 프롬프트 시스템 초기화 (grader들을 위해 먼저 초기화)
     debug_print("📝 프롬프트 시스템 초기화 중...")
@@ -94,7 +107,8 @@ def initialize_rag_system():
         web_search_tool=web_search_tool,  # 웹 검색 도구 전달
         weather_manager=weather_manager,  # 기상 예보 관리자 전달
         pest_predictor=pest_predictor,  # 병해충 예측 모듈 전달
-        rag_prompt=prompts.get("rag_prompt")  # RAG 프롬프트 전달
+        rag_prompt=prompts.get("rag_prompt"),  # RAG 프롬프트 전달
+        judge_llm=judge_llm  # Judge LLM 전달
     )
     
     # 9. 워크플로우 구성
