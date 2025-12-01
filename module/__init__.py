@@ -9,7 +9,6 @@ from .models import (
     MultiQuestionResult,
     QuestionComplexity,
     GradeDocuments,
-    GradeHallucinations,
     GradeAnswer,
 )
 from .config import DEBUG_MODE, MODEL_NAME, debug_print
@@ -50,7 +49,6 @@ __all__ = [
     "MultiQuestionResult",
     "QuestionComplexity",
     "GradeDocuments",
-    "GradeHallucinations",
     "GradeAnswer",
     # Config
     "DEBUG_MODE",
