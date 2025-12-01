@@ -17,11 +17,11 @@ from langchain_core.output_parsers import StrOutputParser
 # 노드 함수들은 전역 변수에 의존하므로 초기화 함수 필요
 def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker_func=None, 
                      question_router=None, question_validator=None, web_search_tool=None,
-                     weather_manager=None, pest_predictor=None, rag_prompt=None):
+                     weather_manager=None, pest_predictor=None, rag_prompt=None, judge_llm=None):
     """노드 함수들을 초기화하는 함수 (전역 변수 설정)"""
     global _rag_pipeline, _llm, _crop_retrievers, _reranker, _free_reranker
     global _question_router, _question_validator, _web_search_tool, _rag_prompt
-    global _weather_manager, _pest_predictor
+    global _weather_manager, _pest_predictor, _judge_llm
     
     _rag_pipeline = rag_pipeline
     _llm = llm
@@ -34,6 +34,7 @@ def initialize_nodes(rag_pipeline, llm, crop_retrievers, reranker, free_reranker
     _weather_manager = weather_manager
     _pest_predictor = pest_predictor
     _rag_prompt = rag_prompt
+    _judge_llm = judge_llm
 
 
 # 전역 변수 (initialize_nodes로 설정됨)
@@ -48,6 +49,7 @@ _web_search_tool = None
 _weather_manager = None
 _pest_predictor = None
 _rag_prompt = None
+_judge_llm = None
 
 def retrieval_node(state: GraphState) -> GraphState:
     """검색 노드 - RAG의 핵심"""
@@ -250,8 +252,8 @@ def generation_node(state: GraphState) -> GraphState:
 
 
 def answer_refinement_node(state: GraphState) -> GraphState:
-    """답변 정리 노드 - RAG 답변만 보강 (ChatGPT 자체 지식 사용 안 함)"""
-    debug_print("==== [ANSWER REFINEMENT NODE] ====")
+    """하이브리드 답변 보강 노드 - RAG 답변 + LLM 자체 지식 보충"""
+    debug_print("==== [HYBRID ANSWER REFINEMENT NODE] ====")
     question = state.get("question", "")
     rag_answer = state.get("answer", "")
     retry_count = state.get("retry_count", 0)
@@ -275,9 +277,8 @@ def answer_refinement_node(state: GraphState) -> GraphState:
             debug_print("⚠️ LLM이 없어 정리 건너뜀")
             return state
         
-        # RAG 답변만 받아서 보강/개선 (ChatGPT 자체 지식 사용 안 함)
         try:
-            debug_print("🔧 RAG 답변 보강 중...")
+            debug_print("🔧 하이브리드 답변 보강 중...")
             
             # 검색된 문서 정보 추가 (참고용)
             doc_summary = ""
@@ -288,8 +289,108 @@ def answer_refinement_node(state: GraphState) -> GraphState:
                     source = doc.metadata.get("source", "Unknown")
                     doc_summary += f"\n[문서 {i+1}] 출처: {source}\n{content}...\n"
             
-            # RAG 답변 보강 프롬프트
-            enhancement_prompt = f"""당신은 농업 전문가이자 답변 개선 전문가입니다.
+            # 1단계: RAG 답변 분석 - 부족한 정보 식별
+            debug_print("📊 1단계: RAG 답변 분석 중...")
+            gap_analysis_prompt = f"""다음 RAG 답변을 분석하여 질문에 대해 부족한 정보가 있는지 확인하세요.
+
+**질문:**
+{question}
+
+**RAG 답변:**
+{rag_answer}
+
+**참조 문서 요약:**
+{doc_summary if doc_summary else "참조 문서 없음"}
+
+다음 항목을 분석하세요:
+1. 질문의 핵심 요구사항이 모두 충족되었는가?
+2. RAG 답변에 누락된 중요한 정보가 있는가?
+3. 구체적인 수치, 시기, 방법 등이 부족한가?
+4. 질문의 의도와 답변이 완전히 일치하는가?
+
+부족한 정보가 있다면 구체적으로 나열하세요. 없으면 "정보 충분"이라고만 답하세요."""
+            
+            gap_analysis = _llm.invoke(gap_analysis_prompt).content
+            debug_print(f"📋 부족한 정보 분석 결과: {gap_analysis[:200]}...")
+            
+            # 2단계: LLM 자체 지식으로 보충 답변 생성 (부족한 정보만)
+            llm_supplement = ""
+            if "정보 충분" not in gap_analysis and len(gap_analysis.strip()) > 10:
+                debug_print("📝 RAG 답변에 부족한 정보 감지, LLM 자체 지식으로 보충")
+                
+                llm_knowledge_prompt = f"""당신은 농업 전문가입니다. 다음 질문에 대해 일반적인 농업 지식을 바탕으로 답변하세요.
+
+**질문:**
+{question}
+
+**RAG 답변에서 부족한 부분:**
+{gap_analysis}
+
+**중요 지침:**
+- RAG 답변에 이미 포함된 정보는 반복하지 마세요
+- 부족한 정보만 보충하세요
+- 일반적으로 알려진 농업 지식을 사용하되, 확실하지 않은 정보는 명시하세요
+- 수치나 구체적 정보는 "일반적으로", "보통", "일반적으로 알려진 바에 따르면" 등의 표현을 사용하세요
+- 확실하지 않은 정보는 "확인 필요", "전문가 상담 권장" 등의 표현을 사용하세요
+- RAG 답변과 충돌하는 정보는 제공하지 마세요
+
+부족한 정보에 대한 보충 답변만 제공하세요. RAG 답변에 이미 충분한 정보가 있다면 "추가 보충 불필요"라고 답하세요."""
+                
+                llm_supplement = _llm.invoke(llm_knowledge_prompt).content
+                debug_print(f"💡 LLM 보충 답변 생성 완료: {len(llm_supplement)} 문자")
+            else:
+                debug_print("✅ RAG 답변이 충분하여 LLM 보충 불필요")
+            
+            # 3단계: RAG 답변과 LLM 보충 답변 통합
+            if llm_supplement and "추가 보충 불필요" not in llm_supplement:
+                debug_print("🔗 RAG 답변과 LLM 보충 답변 통합 중...")
+                
+                integration_prompt = f"""다음 두 답변을 통합하여 완전한 답변을 생성하세요.
+
+**원본 질문:**
+{question}
+
+**RAG 시스템 답변 (문서 기반, 우선순위 높음):**
+{rag_answer}
+
+**LLM 자체 지식 보충 (부족한 정보만):**
+{llm_supplement}
+
+**참조 문서 (참고용):**
+{doc_summary if doc_summary else "참조 문서 없음"}
+
+## 통합 지침
+
+1. **RAG 답변을 기본 골격으로 유지**: RAG 답변의 모든 핵심 정보는 그대로 유지하세요
+2. **LLM 보충 답변에서 RAG 답변에 없는 정보만 추가**: 중복을 피하고 새로운 정보만 통합하세요
+3. **정보 출처 구분**:
+   - RAG 답변 내용: 문서 기반 정보 (기본 정보)
+   - LLM 보충 내용: 일반 농업 지식 (확인 필요 시 전문가 상담 권장)
+4. **논리적 흐름과 구조 유지**: 자연스럽게 통합하여 읽기 쉽게 구성하세요
+5. **표현 개선**:
+   - 불필요한 중복 제거
+   - 문장을 자연스럽게 다듬기
+   - 마크다운 형식 활용 (제목, 목록, 강조 등)
+   - 단락 구분 및 구조 정리
+6. **정보 정확성 유지**:
+   - RAG 답변의 수치, 시기, 방법 등 구체적 정보는 변경하지 않음
+   - LLM 보충 정보는 일반적인 지식임을 명시
+
+## 주의사항
+
+- RAG 답변과 LLM 보충 답변이 충돌하면 RAG 답변을 우선하세요
+- LLM 보충 정보는 "일반적으로", "보통" 등의 표현을 사용하여 불확실성을 표시하세요
+- 질문과 무관한 정보를 추가하지 마세요
+
+통합된 최종 답변을 생성하세요."""
+                
+                enhanced_answer = _llm.invoke(integration_prompt).content
+                debug_print("✅ 하이브리드 답변 통합 완료")
+            else:
+                # LLM 보충이 필요 없으면 기존 RAG 답변만 구조화
+                debug_print("📝 RAG 답변만 구조화 및 개선 중...")
+                
+                enhancement_prompt = f"""당신은 농업 전문가이자 답변 개선 전문가입니다.
 다음 RAG 시스템이 검색한 문서 기반 답변을 보강하고 개선하세요.
 
 **원본 질문:**
@@ -323,7 +424,6 @@ def answer_refinement_node(state: GraphState) -> GraphState:
 ### ❌ 금지 사항:
 1. **새로운 정보 추가 금지**: 
    - 검색된 문서에 없는 정보를 추가하지 마세요
-   - ChatGPT의 자체 지식을 사용하지 마세요
    - 추측이나 일반적인 농업 지식을 추가하지 마세요
 
 2. **내용 변경 금지**:
@@ -344,14 +444,15 @@ def answer_refinement_node(state: GraphState) -> GraphState:
 
 위 RAG 답변을 보강하여 개선된 답변을 생성하세요. 새로운 정보를 추가하지 말고, 기존 RAG 답변의 내용을 더 명확하고 읽기 쉽게 개선하세요.
 """
+                
+                enhanced_answer = _llm.invoke(enhancement_prompt).content
+                debug_print("✅ RAG 답변 구조화 완료")
             
-            enhanced_answer = _llm.invoke(enhancement_prompt).content
-            debug_print("✅ RAG 답변 보강 완료")
-            debug_print(f"📏 보강된 답변 길이: {len(enhanced_answer)} 문자")
+            debug_print(f"📏 최종 보강된 답변 길이: {len(enhanced_answer)} 문자")
             
             # ⭐ 보강된 답변 출력
             debug_print("=" * 80)
-            debug_print("✨ [보강된 RAG 답변]")
+            debug_print("✨ [하이브리드 보강된 답변]")
             debug_print("=" * 80)
             debug_print(enhanced_answer)
             debug_print("=" * 80)
@@ -360,11 +461,13 @@ def answer_refinement_node(state: GraphState) -> GraphState:
                 **state,
                 "answer": enhanced_answer,
                 "original_answer": rag_answer,
-                "status": "enhanced"
+                "gap_analysis": gap_analysis,  # LLM Judge에서 활용하기 위해 저장
+                "llm_supplement": llm_supplement if llm_supplement and "추가 보충 불필요" not in llm_supplement else None,
+                "status": "hybrid_enhanced" if llm_supplement and "추가 보충 불필요" not in llm_supplement else "enhanced"
             }
             
         except Exception as e:
-            debug_print(f"⚠️ RAG 답변 보강 실패: {e}")
+            debug_print(f"⚠️ 하이브리드 답변 보강 실패: {e}")
             import traceback
             debug_print(traceback.format_exc())
             # 보강 실패 시 기존 RAG 답변 사용
@@ -400,151 +503,327 @@ def llm_judge_node(state: GraphState) -> GraphState:
     route = state.get("route", "vectorstore")
     
     try:
+        # 답변이 없으면 평가 스킵
         if not refined_answer or refined_answer.strip() == "":
             debug_print("⚠️ 답변이 없어 평가 건너뜀")
             return preserve_state_fields(state, {
                 "llm_judge_scores": {
+                    "accuracy": 0,
+                    "completeness": 0,
+                    "logical_consistency": 0,
+                    "usefulness": 0,
+                    "hallucination": 0,
+                    "overall_score": 0,
                     "should_output": False,
                     "needs_correction": True,
+                    "correction_suggestions": "",
                     "reasoning": "답변이 없어 평가 불가",
                     "is_valid": False,
-                    "overall_score": 0
                 },
                 "status": "judge_skipped"
             })
         
-        if _llm is None:
+        # LLM 존재 여부 확인
+        if _llm is None and not (_rag_pipeline and getattr(_rag_pipeline, "llm", None)):
             debug_print("⚠️ LLM이 없어 평가 건너뜀")
             return preserve_state_fields(state, {
                 "llm_judge_scores": {
+                    "accuracy": 0,
+                    "completeness": 0,
+                    "logical_consistency": 0,
+                    "usefulness": 0,
+                    "hallucination": 0,
+                    "overall_score": 0,
                     "should_output": False,
                     "needs_correction": True,
+                    "correction_suggestions": "",
                     "reasoning": "LLM이 없어 평가 불가",
                     "is_valid": False,
-                    "overall_score": 0
                 },
                 "status": "judge_skipped"
             })
         
-        # 참조 문서 요약
+        # 참조 문서 요약 (출처 강조)
         doc_summary = ""
         if documents:
             doc_summary = "\n\n=== 참조 문서 요약 ===\n"
             for i, doc in enumerate(documents[:10]):
-                content = doc.page_content[:300] if hasattr(doc, 'page_content') else str(doc)[:300]
-                source = doc.metadata.get("source", "Unknown")
-                doc_summary += f"\n[문서 {i+1}] 출처: {source}\n{content}...\n"
-        
-        # LLM Judge 프롬프트
-                judge_prompt = f"""
-당신은 농업 전문가이자 답변 품질 검증자입니다. 다음 보강된 RAG 답변을 종합적으로 검증하고 판단하세요.
-
-**질문:** {question}
-
-**보강된 RAG 답변:** {refined_answer}
-
-**참조 문서:**
-{doc_summary if doc_summary else "참조 문서 없음"}
-
-**검색 경로:** {route} (vectorstore 또는 web_search)
-**재시도 횟수:** {retry_count}/3
-
-## 통합 검증 과제
-
-다음 관점에서 답변을 종합적으로 검증하세요:
-
-### 1. 사실성 검증 (Fact-Checking)
-- 답변의 각 주장이 참조 문서에 근거하는가?
-- 참조 문서와 모순되는 정보가 있는가?
-- 명확한 사실 오류가 있는가?
-- 웹검색 결과인 경우 출처 신뢰성도 고려
-
-### 2. 완전성 검증 (Completeness Check)
-- 질문의 모든 부분에 답했는가?
-- 중요한 정보가 누락되었는가?
-- 사용자가 기대하는 정보를 모두 제공했는가?
-
-### 3. 정확성 검증 (Accuracy Check)
-- 농약 정보, 방제법, 재배법 등이 정확한가?
-- 농업 전문 용어가 올바르게 사용되었는가?
-- 수치나 시기 정보가 정확한가?
-
-### 4. 일관성 검증 (Consistency Check)
-- 답변 내부에 논리적 모순이 있는가?
-- 참조 문서 간 모순이 있는가?
-- 웹검색과 벡터스토어 결과 간 모순이 있는가?
-
-### 5. 유용성 검증 (Usefulness Check)
-- 실제 농업 현장에서 적용 가능한가?
-- 구체적이고 실용적인 정보인가?
-- 사용자에게 도움이 되는가?
-
-### 6. 검색 결과 품질 검증
-- 벡터스토어 결과: 관련성과 정확성
-- 웹검색 결과: 출처 신뢰성, 관련성, 일관성
-- 검색 결과가 질문에 충분히 답할 수 있는가?
-
-## 최종 판단
-
-위 모든 검증을 바탕으로 다음을 판단하세요:
-
-1. **should_output**: 이 답변을 사용자에게 출력해도 되는가?
-   - 모든 검증을 통과하고 충분히 정확하고 완전하면 True
-   - 명확한 오류나 누락이 있으면 False
-
-2. **needs_correction**: 답변이 수정이 필요한가?
-   - 명확한 오류나 누락이 있으면 True
-   - 충분히 정확하고 완전하면 False
-
-3. **correction_suggestions**: 수정이 필요한 경우 구체적인 개선 방안 제시
-
-농업 정보의 정확성이 매우 중요하므로, 확신이 없으면 should_output을 False로 판단하세요.
-"""
+                content = getattr(doc, "page_content", str(doc))[:300]
+                source = getattr(doc, "metadata", {}).get("source", "Unknown")
                 
-        # LLM 사용 가능 여부 확인
+                # 출처 신뢰도 힌트 추가
+                trust_hint = ""
+                if "rda.go.kr" in source or "nongsaro.go.kr" in source:
+                    trust_hint = "[신뢰도 높음: 공식 농업 기관]"
+                elif ".go.kr" in source or ".edu" in source or ".ac.kr" in source:
+                    trust_hint = "[신뢰도 높음: 정부/학술 기관]"
+                
+                doc_summary += f"\n[문서 {i+1}] 출처: {source} {trust_hint}\n{content}...\n"
+        
+        # answer_refinement_node에서 수행한 gap_analysis 가져오기 (중복 평가 방지)
+        gap_analysis = state.get("gap_analysis", "")
+        gap_analysis_section = ""
+        if gap_analysis and gap_analysis.strip() and "정보 충분" not in gap_analysis:
+            gap_analysis_section = f"""
+● 이전 정보 부족 분석 결과 (참고용)
+answer_refinement_node에서 이미 수행한 분석 결과입니다. 이를 참고하여 중복 평가를 피하세요.
+{gap_analysis}
+
+**중요**: 위 분석 결과를 참고하되, 최종 답변(보강 후)의 품질을 기준으로 평가하세요.
+보강 과정에서 부족한 정보가 보충되었는지 확인하세요.
+"""
+        
+        # LLM Judge 프롬프트 (LLMJudgeScores 스키마에 맞춘 최종 버전)
+        judge_prompt = f"""
+당신은 농업 전문가이자 고급 LLM 품질 심사관(LLM-as-a-Judge)입니다.
+당신의 역할은 "질문, 보강된 RAG 답변, 참조 문서"를 기반으로
+LLMJudgeScores 스키마에 맞추어 답변의 품질을 정량/정성적으로 평가하는 것입니다.
+
+[입력 정보]
+
+● 질문 (Question)
+{question}
+
+● 보강된 RAG 답변 (Refined Answer)
+{refined_answer}
+
+● 참조 문서 요약 (Context)
+{doc_summary if doc_summary else "참조 문서 없음"}
+{gap_analysis_section}
+● 검색 경로 (Route): {route}  (vectorstore 또는 web_search)
+● 재시도 횟수: {retry_count}/3
+
+============================================================
+[평가 항목 및 기준]
+
+아래 6개 항목 각각에 대해 0~100점(정수)을 부여하세요.
+
+1) accuracy (정확성과 전문성, 0~100)
+- 100점: 완벽하게 정확하고 전문적인 정보
+- 80-99점: 대체로 정확하고 전문적이나 일부 부정확한 부분 있음
+- 60-79점: 일반적으로 정확하나 전문 용어 사용이나 전문 지식 깊이 부족
+- 40-59점: 일부 정확하나 전문성 부족
+- 0-39점: 대부분 부정확하거나 비전문적
+
+평가 기준:
+- 농약 정보, 병해충, 방제법, 재배법 등이 실제 농업 지식과 일치하는가?
+- 농업 전문 용어를 정확하게 사용했는가?
+- 수치, 시기, 조건 등이 정확한가?
+
+2) completeness (완전성과 상세도, 0~100)
+- 100점: 질문의 모든 부분에 대해 완전하고 상세하게 답변
+- 80-99점: 대부분의 질문에 답변하나 일부 상세 정보 누락
+- 60-79점: 핵심 질문에 답변하나 상세 정보 부족
+- 40-59점: 일부만 답변하나 많은 정보 누락
+- 0-39점: 질문에 거의 답변하지 못함
+
+평가 기준:
+- 질문의 모든 부분에 답변했는가?
+- 중요한 정보가 누락되지 않았는가?
+- 구체적인 수치, 시기, 방법 등 충분한 상세 정보를 제공하는가?
+
+3) logical_consistency (논리적 일관성과 구조화, 0~100)
+- 100점: 논리적으로 완벽하게 구조화된 답변
+- 80-99점: 대체로 논리적이나 일부 불일치
+- 60-79점: 일반적으로 논리적이나 구조 부족
+- 40-59점: 일부 논리적이나 많은 불일치
+- 0-39점: 논리적으로 일관성 없음
+
+평가 기준:
+- 답변 내부에 논리적 모순이 없는가?
+- 문단/단계 간 흐름이 자연스럽고 구조화되어 있는가?
+- 참조 문서 내용과 논리적으로 일관되는가?
+
+4) usefulness (실용성, 0~100)
+- 100점: 즉시 적용 가능한 실용적인 정보
+- 80-99점: 대체로 유용하나 일부 실용성 부족
+- 60-79점: 일반적으로 유용하나 구체성 부족
+- 40-59점: 일부 유용하나 대부분 추상적
+- 0-39점: 거의 유용하지 않음
+
+평가 기준:
+- 실제 농업 현장에서 바로 활용 가능한 정보인가?
+- 실행 가능한 단계, 조건, 주의사항 등이 포함되어 있는가?
+- 사용자가 의사결정을 내리는 데 도움을 주는가?
+
+5) hallucination (사실 기반 정도, 0~100)
+- 100점: 모든 주장이 참조 문서에 완벽하게 근거하고 있음
+- 80-99점: 대부분의 주장이 문서에 근거하나 일부 불확실한 부분 있음
+- 60-79점: 주요 주장은 문서에 근거하나 일부 추측이나 문서에 없는 정보 포함
+- 40-59점: 많은 주장이 문서에 근거하지 않거나 추측에 의존
+- 0-39점: 대부분의 정보가 문서에 근거하지 않거나 거짓 정보 포함
+
+평가 기준:
+- 답변의 각 주장이 참조 문서 또는 일반적으로 알려진 농업 지식에 근거하는가?
+- 문서에 없는 내용을 과도하게 추측하지 않았는가?
+- 문서 내용과 모순되는 부분이 없는가?
+- 거짓 정보나 명백히 잘못된 정보를 포함하지 않았는가?
+
+6) intent_alignment (질문 의도 부합성, 0~100)
+- 100점: 사용자의 핵심 의도를 정확히 파악하고 그에 맞는 답변을 제공함
+- 80-99점: 의도에 대체로 부합하나 약간의 초점 이탈 있음
+- 60-79점: 관련 정보는 제공하나 사용자가 진짜 궁금해하는 핵심을 놓침
+- 40-59점: 질문의 주제와 관련은 있으나 엉뚱한 측면을 설명함 (예: 방제약을 물었는데 증상만 설명)
+- 0-39점: 질문의 의도와 완전히 다른 동문서답
+
+평가 기준:
+- 답변이 질문의 핵심 의도(Key Intent)를 정확히 타격하고 있는가?
+- 질문은 A를 묻는데 B를 답하고 있지 않은가?
+- 사용자가 이 답변을 보고 "내가 궁금한 건 이게 아닌데"라고 할 가능성이 없는가?
+
+============================================================
+[출처 신뢰도 가중치 (Source Credibility)]
+
+평가 시 참조 문서의 '출처(Source)'를 반드시 확인하고 가중치를 두세요.
+
+1. **공식/학술 기관 우선**:
+   - 농촌진흥청(rda.go.kr), 농사로(nongsaro.go.kr), 대학(.ac.kr), 정부(.go.kr) 등 신뢰할 수 있는 도메인의 정보를 최우선으로 신뢰하세요.
+   - 이러한 출처의 정보와 일반 블로그/뉴스 정보가 충돌하면, **공식 기관의 정보를 정답으로 간주**하세요.
+
+2. **일반 웹 검색 결과 주의**:
+   - 출처가 불분명한 블로그, 카페, 커뮤니티 글은 신뢰도를 낮게 평가하세요.
+   - 특히 농약 희석 배수나 안전 사용 기준 등 민감한 정보는 공식 출처가 아니면 감점 요인이 될 수 있습니다.
+
+============================================================
+[평가 예시 (Few-Shot Examples)]
+
+다음은 평가의 논리를 보여주는 예시입니다. 특정 작물이 아니라 "평가 논리"를 참고하세요.
+
+Case 1: Hallucination (문서에 없는 내용 날조)
+- 상황: 문서는 "A 약제 사용"만 언급했는데, 답변에서 "A 약제를 500배 희석하여 3일 간격 살포"라고 구체적 수치를 날조함.
+- 평가:
+  - hallucination: 20점 (문서에 없는 수치를 지어냄, 매우 위험)
+  - accuracy: 40점 (약제 이름은 맞았으나 사용법이 틀림)
+  - should_output: False
+  - needs_correction: True
+  - reasoning: "문서에는 희석 배수와 살포 간격이 없는데 답변에서 이를 임의로 생성했습니다. 이는 농작물에 피해를 줄 수 있는 심각한 할루시네이션입니다."
+
+Case 2: Intent Mismatch (질문 의도 불일치)
+- 상황: 질문은 "탄저병 방제약"을 물었는데, 답변은 "탄저병의 증상과 원인"만 길게 설명하고 약제 정보는 없음.
+- 평가:
+  - usefulness: 30점 (사용자가 원하는 약제 정보가 없음)
+  - completeness: 40점 (핵심 질문에 답하지 않음)
+  - should_output: False
+  - needs_correction: True
+  - reasoning: "답변 내용은 정확하지만, 사용자가 질문한 '방제약' 정보가 누락되어 있습니다. 질문의 핵심 의도를 충족하지 못했습니다."
+
+Case 3: Good Answer (이상적인 답변)
+- 상황: 질문에 대해 문서에 있는 내용을 기반으로 답변하고, 문서에 없는 내용은 "문서에 관련 정보가 없습니다"라고 솔직하게 명시함.
+- 평가:
+  - hallucination: 100점 (문서에 있는 내용만 말하고, 없는 건 없다고 함)
+  - accuracy: 100점
+  - usefulness: 90점
+  - should_output: True
+  - needs_correction: False
+
+============================================================
+[추가 판단 항목]
+
+아래 항목들도 반드시 함께 판단하세요.
+
+6) overall_score (종합 점수, 0~100)
+- 위 6개 항목(accuracy, completeness, logical_consistency, usefulness, hallucination, intent_alignment)을 종합 평가한 점수입니다.
+- 정확성(accuracy), 사실 기반(hallucination), 의도 부합성(intent_alignment)을 가장 중요하게 반영하세요.
+- 한두 항목이 매우 낮다면 overall_score도 낮아야 합니다.
+
+7) is_valid (bool)
+- 이 답변이 "농업 도메인에서 의미 있고 유효한 답변"인지 판단하세요.
+- 심각한 사실 오류, 문서와의 모순, 위험한 조언이 있으면 False로 판단하세요.
+
+8) should_output (bool)
+- 이 답변을 사용자에게 그대로 출력해도 되는지 판단하세요.
+- 충분히 정확하고, 사실에 근거하고, 실용적이며, 위험하지 않다면 True입니다.
+- 확신이 없거나 위험 가능성이 있으면 False로 판단하세요.
+
+9) needs_correction (bool)
+- 이 답변이 수정/보완이 필요한지 판단하세요.
+- 중요한 정보 누락, 문서와의 모순, 명백한 오류가 있으면 True입니다.
+- 사소한 표현 문제만 있는 경우에는 False일 수 있습니다.
+
+10) correction_suggestions (string)
+- needs_correction이 True인 경우, 어떤 부분을 어떻게 수정해야 하는지 구체적으로 제안하세요.
+- 잘못된 정보, 누락된 정보, 보완해야 할 점을 항목별로 설명하세요.
+- needs_correction이 False인 경우 빈 문자열을 사용하세요.
+
+11) reasoning (string)
+- 위의 점수와 판단을 내린 근거를 상세히 서술하세요.
+- 각 점수에 영향을 준 핵심 요소를 설명하고,
+  답변의 강점과 약점, 할루시네이션 위험 여부를 구체적으로 기술하세요.
+
+============================================================
+[출력 형식]
+
+- 당신은 LLMJudgeScores 스키마에 맞춰 structured output을 생성해야 합니다.
+- 각 필드는 다음 형식을 지켜야 합니다:
+  - accuracy, completeness, logical_consistency, usefulness, hallucination, overall_score: 0~100 정수
+  - is_valid, should_output, needs_correction: True 또는 False
+  - correction_suggestions, reasoning: 문자열
+
+농업 정보의 정확성과 안전성이 매우 중요하므로,
+조금이라도 확신이 없다면 점수를 보수적으로 주고,
+should_output을 False로 판단하는 것을 우선하세요.
+
+12) insufficient_information (bool)
+- 참조 문서에 답변에 필요한 핵심 정보가 부족한지 판단하세요.
+- 문서에 정보가 없어서 답변이 부실하거나 추측해야 한다면 True로 설정하세요.
+- 이 값이 True이면 시스템은 웹 검색을 시도할 것입니다.
+"""
+        
+        # LLM 선택 (Judge LLM 우선, 그 다음 파이프라인 LLM, 마지막으로 기본 LLM)
         llm_to_use = None
-        if _rag_pipeline and hasattr(_rag_pipeline, 'llm') and _rag_pipeline.llm:
+        if _judge_llm:
+            llm_to_use = _judge_llm
+            debug_print(f"⚖️ Judge LLM 사용: {getattr(_judge_llm, 'model_name', 'Unknown')}")
+        elif _rag_pipeline and hasattr(_rag_pipeline, "llm") and _rag_pipeline.llm:
             llm_to_use = _rag_pipeline.llm
         elif _llm:
             llm_to_use = _llm
         
         if llm_to_use:
             try:
-                # 구조화된 LLM 호출로 품질 평가 및 판단
+                # 구조화된 LLM 호출로 품질 평가
                 structured_llm = llm_to_use.with_structured_output(LLMJudgeScores)
                 judge_result = structured_llm.invoke(judge_prompt)
                 result_dict = judge_result.model_dump()
                 
-                # overall_score는 LLM이 자동 계산하도록 함 (임계값 없이)
-                if "overall_score" not in result_dict:
-                    debug_print("⚠️ LLM이 overall_score를 계산하지 않음")
-                    result_dict["overall_score"] = 0  # 기본값만 설정
+                # 방어적 기본값 보정 (혹시라도 누락된 필드가 있을 경우)
+                result_dict.setdefault("accuracy", 0)
+                result_dict.setdefault("completeness", 0)
+                result_dict.setdefault("logical_consistency", 0)
+                result_dict.setdefault("usefulness", 0)
+                result_dict.setdefault("hallucination", 0)
+                result_dict.setdefault("overall_score", 0)
+                result_dict.setdefault("should_output", False)
+                result_dict.setdefault("needs_correction", True)
+                result_dict.setdefault("correction_suggestions", "")
+                result_dict.setdefault("reasoning", "")
+                result_dict.setdefault("is_valid", result_dict.get("should_output", False))
+                result_dict.setdefault("insufficient_information", False)
                 
-                # is_valid는 should_output과 동일하게 설정
-                if "is_valid" not in result_dict:
-                    result_dict["is_valid"] = result_dict.get("should_output", False)
-                
-                # should_output과 needs_correction이 없으면 기본값 설정
-                if "should_output" not in result_dict:
-                    result_dict["should_output"] = result_dict.get("is_valid", False)
-                if "needs_correction" not in result_dict:
-                    result_dict["needs_correction"] = not result_dict.get("should_output", False)
-                if "correction_suggestions" not in result_dict:
-                    result_dict["correction_suggestions"] = ""
-                if "reasoning" not in result_dict:
-                    result_dict["reasoning"] = ""
-                
-                debug_print(f"✅ 품질 평가 완료: accuracy={result_dict.get('accuracy')}, completeness={result_dict.get('completeness')}, overall={result_dict.get('overall_score')}")
-                debug_print(f"✅ 최종 판단: should_output={result_dict.get('should_output')}, needs_correction={result_dict.get('needs_correction')}")
+                debug_print(
+                    f"✅ 품질 평가 완료: "
+                    f"accuracy={result_dict.get('accuracy')}, "
+                    f"completeness={result_dict.get('completeness')}, "
+                    f"logical_consistency={result_dict.get('logical_consistency')}, "
+                    f"usefulness={result_dict.get('usefulness')}, "
+                    f"hallucination={result_dict.get('hallucination')}, "
+                    f"overall={result_dict.get('overall_score')}"
+                )
+                debug_print(
+                    f"✅ 최종 판단: should_output={result_dict.get('should_output')}, "
+                    f"needs_correction={result_dict.get('needs_correction')}, "
+                    f"is_valid={result_dict.get('is_valid')}, "
+                    f"insufficient_information={result_dict.get('insufficient_information')}"
+                )
                 
                 # quality_scores 생성 (하위 호환성)
                 quality_scores = {
                     "retrieval_accuracy": 0.8 if documents else 0.2,
                     "answer_relevance": result_dict.get("usefulness", 0) / 100.0,
                     "answer_correctness": result_dict.get("accuracy", 0) / 100.0,
-                    "hallucination_score": 1.0 if result_dict.get("accuracy", 0) >= 70 else 0.5,
+                    "hallucination_score": result_dict.get("hallucination", 0) / 100.0,
                     "overall_score": result_dict.get("overall_score", 0) / 100.0,
-                    "evaluation_method": "LLM"
+                    "evaluation_method": "LLM",
                 }
                 
                 return preserve_state_fields(state, {
@@ -554,16 +833,19 @@ def llm_judge_node(state: GraphState) -> GraphState:
                         "completeness": result_dict.get("completeness", 0),
                         "logical_consistency": result_dict.get("logical_consistency", 0),
                         "usefulness": result_dict.get("usefulness", 0),
+                        "hallucination": result_dict.get("hallucination", 0),
+                        "intent_alignment": result_dict.get("intent_alignment", 0),
                         "overall_score": result_dict.get("overall_score", 0),
                         "should_output": result_dict.get("should_output", False),
                         "needs_correction": result_dict.get("needs_correction", True),
                         "correction_suggestions": result_dict.get("correction_suggestions", ""),
                         "reasoning": result_dict.get("reasoning", ""),
-                        "is_valid": result_dict.get("is_valid", False)
+                        "is_valid": result_dict.get("is_valid", False),
+                        "insufficient_information": result_dict.get("insufficient_information", False),
                     },
-                    "status": "judged"
+                    "status": "judged",
                 })
-                
+            
             except Exception as e:
                 debug_print(f"⚠️ 구조화된 출력 실패: {e}, 기본값 사용")
                 # Fallback: 기본값 설정
@@ -574,19 +856,27 @@ def llm_judge_node(state: GraphState) -> GraphState:
                         "answer_correctness": 0.5,
                         "hallucination_score": 0.5,
                         "overall_score": 0.5,
-                        "evaluation_method": "Fallback"
+                        "evaluation_method": "Fallback",
                     },
-                        "llm_judge_scores": {
-                            "should_output": True,
-                            "needs_correction": False,
+                    "llm_judge_scores": {
+                        "accuracy": 50,
+                        "completeness": 50,
+                        "logical_consistency": 50,
+                        "usefulness": 50,
+                        "hallucination": 50,
+                        "intent_alignment": 50,
+                        "overall_score": 50,
+                        "should_output": True,
+                        "needs_correction": False,
+                        "correction_suggestions": "",
                         "reasoning": f"구조화된 출력 실패: {str(e)}",
-                            "is_valid": True,
-                        "overall_score": 50
+                        "is_valid": True,
+                        "insufficient_information": False,
                     },
-                    "status": "judge_fallback"
+                    "status": "judge_fallback",
                 })
         
-        # LLM이 없는 경우 기본값 반환
+        # LLM이 없는 경우 기본값 반환 (이전에 걸리면 여기까지 안 옴)
         return preserve_state_fields(state, {
             "quality_scores": {
                 "retrieval_accuracy": 0.3,
@@ -594,18 +884,26 @@ def llm_judge_node(state: GraphState) -> GraphState:
                 "answer_correctness": 0.3,
                 "hallucination_score": 0.5,
                 "overall_score": 0.35,
-                "evaluation_method": "None"
+                "evaluation_method": "None",
             },
             "llm_judge_scores": {
+                "accuracy": 0,
+                "completeness": 0,
+                "logical_consistency": 0,
+                "usefulness": 0,
+                "hallucination": 0,
+                "intent_alignment": 0,
+                "overall_score": 0,
                 "should_output": False,
                 "needs_correction": True,
+                "correction_suggestions": "",
                 "reasoning": "LLM이 없어 평가 불가",
                 "is_valid": False,
-                "overall_score": 0
+                "insufficient_information": False,
             },
-            "status": "judge_skipped"
+            "status": "judge_skipped",
         })
-        
+    
     except Exception as e:
         debug_print(f"==== [LLM JUDGE ERROR: {e}] ====")
         return preserve_state_fields(state, {
@@ -615,18 +913,27 @@ def llm_judge_node(state: GraphState) -> GraphState:
                 "answer_correctness": 0.3,
                 "hallucination_score": 0.5,
                 "overall_score": 0.35,
-                "evaluation_method": "Error"
+                "evaluation_method": "Error",
             },
             "llm_judge_scores": {
+                "accuracy": 0,
+                "completeness": 0,
+                "logical_consistency": 0,
+                "usefulness": 0,
+                "hallucination": 0,
+                "intent_alignment": 0,
+                "overall_score": 0,
                 "should_output": False,
                 "needs_correction": True,
+                "correction_suggestions": "",
                 "reasoning": f"오류 발생: {str(e)}",
                 "is_valid": False,
-                "overall_score": 0
+                "insufficient_information": False,
             },
             "status": "judge_failed",
-            "error_message": f"LLM Judge failed: {str(e)}"
+            "error_message": f"LLM Judge failed: {str(e)}",
         })
+
 
 
 # 라우팅 및 검색 노드들
