@@ -39,6 +39,7 @@ DEBUG_MODE = True
 
 # 최신 LLM 모델 이름 가져오기
 MODEL_NAME = get_model_name(LLMs.GPT4)
+JUDGE_MODEL_NAME = "gemini-1.5-pro"
 
 # ============================================================================
 # Web Search 도메인 필터링 설정
