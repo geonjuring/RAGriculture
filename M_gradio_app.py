@@ -446,6 +446,17 @@ def create_gradio_interface():
         margin-top: 18px;
     }
 
+    /* 기상 및 병해충 정보 가로 배치 스타일 */
+    .schedule-alerts-row {
+        display: flex;
+        gap: 12px;
+        margin-top: 12px;
+    }
+    .schedule-alerts-row > div {
+        flex: 1;
+        min-width: 0;
+    }
+
     /* 푸터 */
     .agri-footer {
         font-size: 0.78rem;
@@ -766,12 +777,6 @@ def create_gradio_interface():
                                     elem_classes=["agri-input"],
                                 )
                                 schedule_generate_btn = gr.Button("일정표 불러오기", variant="primary")
-                                schedule_weather_info = gr.Markdown(
-                                    label="🌤️ 현재 기상 정보",
-                                    value="",
-                                    visible=False,
-                                    elem_classes=["agri-card"],
-                                )
                                 schedule_status = gr.Markdown(value="", elem_classes=["agri-card"], visible=False)
 
                             with gr.Column(scale=2):
@@ -785,6 +790,21 @@ def create_gradio_interface():
                                     label="일정표 데이터 (JSON)",
                                     visible=False
                                 )
+                        
+                        # 기상 및 병해충 알림 표시창 (가로 배치)
+                        with gr.Row():
+                            schedule_weather_info = gr.Markdown(
+                                label="🌤️ 현재 기상 정보",
+                                value="",
+                                visible=False,
+                                elem_classes=["agri-card"],
+                            )
+                            schedule_pest_info = gr.Markdown(
+                                label="🐛 병해충 발생 위험도",
+                                value="",
+                                visible=False,
+                                elem_classes=["agri-card"],
+                            )
 
                         # 상세 작업 검색
                         gr.Markdown(
@@ -943,8 +963,9 @@ def create_gradio_interface():
                     """일정표 생성 및 출력 업데이트 (기상 데이터 포함)"""
                     df, json_data, status_msg = generate_schedule_web_chatgpt(crop, location)
                     
-                    # 기상 데이터 수집
+                    # 기상 데이터 수집 (기상 정보와 병해충 정보 분리)
                     weather_display = ""
+                    pest_display = ""
                     if location and location.strip():
                         try:
                             geo_manager = get_geo_manager()
@@ -991,9 +1012,8 @@ def create_gradio_interface():
                                                     
                                                     debug_print(f"✅ 현재 기상 예보 데이터 발견: {current_forecast}")
                                                     
-                                                    # 기상 데이터 표시용 포맷팅
-                                                    weather_display = f"""### 🌤️ 현재 기상 정보
-**위치**: {location_name}
+                                                    # 기상 데이터 표시용 포맷팅 (병해충 정보 제외)
+                                                    weather_display = f"""**위치**: {location_name}
 
 """
                                                     if current_forecast.get("temp") is not None:
@@ -1011,7 +1031,7 @@ def create_gradio_interface():
                                                     
                                                     debug_print(f"📝 기상 데이터 표시 문자열 생성 완료: {len(weather_display)}자")
                                                     
-                                                    # 병해충 예측 수행
+                                                    # 병해충 예측 수행 (별도 표시)
                                                     if pest_predictor and crop:
                                                         try:
                                                             debug_print(f"🐛 병해충 예측 시작: 작물={crop}, 위치={location_name}")
@@ -1025,27 +1045,25 @@ def create_gradio_interface():
                                                             
                                                             debug_print(f"✅ 병해충 예측 완료: 전체 위험도={pest_prediction.get('overall_risk', 'N/A')}")
                                                             
-                                                            # 병해충 정보를 기상데이터 표시에 추가
-                                                            weather_display += "\n---\n\n"
-                                                            weather_display += f"### 🐛 병해충 발생 위험도\n"
-                                                            weather_display += f"**전체 위험도**: {pest_prediction.get('overall_risk', '낮음')}\n\n"
+                                                            # 병해충 정보를 별도로 표시
+                                                            pest_display = f"**전체 위험도**: {pest_prediction.get('overall_risk', '낮음')}\n\n"
                                                             
                                                             # 위험한 병해충 목록
                                                             high_risk_pests = [pf for pf in pest_prediction.get('pest_forecasts', []) 
                                                                               if pf.get('risk_level') in ['경계', '심각']]
                                                             
                                                             if high_risk_pests:
-                                                                weather_display += "**현재 위험한 병해충**:\n"
+                                                                pest_display += "**현재 위험한 병해충**:\n"
                                                                 for pest in high_risk_pests:
                                                                     pest_name = pest.get('pest_name', '알 수 없음')
                                                                     risk_level = pest.get('risk_level', '알 수 없음')
                                                                     forecast_period = pest.get('forecast_period', '')
-                                                                    weather_display += f"- **{pest_name}**: {risk_level}"
+                                                                    pest_display += f"- **{pest_name}**: {risk_level}"
                                                                     if forecast_period:
-                                                                        weather_display += f" ({forecast_period})"
-                                                                    weather_display += "\n"
+                                                                        pest_display += f" ({forecast_period})"
+                                                                    pest_display += "\n"
                                                             else:
-                                                                weather_display += "**현재 위험한 병해충**: 없음\n"
+                                                                pest_display += "**현재 위험한 병해충**: 없음\n"
                                                             
                                                             debug_print(f"📝 병해충 정보 추가 완료: {len(high_risk_pests)}개 위험 병해충")
                                                             
@@ -1074,7 +1092,15 @@ def create_gradio_interface():
                         debug_print("⚠️ 기상 데이터가 없어 표시하지 않습니다.")
                         weather_update = gr.update(value="", visible=False)
                     
-                    return df, json_data, status_update, weather_update
+                    # 병해충 정보가 있으면 표시, 없으면 숨김
+                    if pest_display and pest_display.strip():
+                        debug_print(f"✅ 병해충 정보 표시: {len(pest_display)}자")
+                        pest_update = gr.update(value=pest_display, visible=True)
+                    else:
+                        debug_print("⚠️ 병해충 정보가 없어 표시하지 않습니다.")
+                        pest_update = gr.update(value="", visible=False)
+                    
+                    return df, json_data, status_update, weather_update, pest_update
                 
                 def search_schedule_task(crop, location, task_query, schedule_df):
                     """일정표 작업 상세 검색 (기상 데이터 및 병해충 예측 포함)"""
@@ -1262,7 +1288,7 @@ def create_gradio_interface():
                 schedule_generate_btn.click(
                     fn=update_schedule,
                     inputs=[schedule_crop, schedule_location],
-                    outputs=[schedule_table, schedule_json, schedule_status, schedule_weather_info]
+                    outputs=[schedule_table, schedule_json, schedule_status, schedule_weather_info, schedule_pest_info]
                 )
                 
                 # 일정표 검색 후 검색 기록 새로고침
