@@ -995,25 +995,59 @@ def create_gradio_interface():
                                                 
                                                 debug_print(f"📊 초단기 예보: {len(ultra_short) if ultra_short else 0}개, 단기 예보: {len(short) if short else 0}개")
                                                 
+                                                # 현재 시간에 가장 가까운 예보 찾기
                                                 current_forecast = None
                                                 if ultra_short or short:
-                                                    for fcst in (ultra_short or []):
-                                                        if fcst.get("temp") is not None:
-                                                            current_forecast = fcst
-                                                            break
-                                                    if not current_forecast and short:
-                                                        for fcst in short:
-                                                            if fcst.get("temp") is not None:
-                                                                current_forecast = fcst
-                                                                break
+                                                    from datetime import datetime
+                                                    now = datetime.now()
+                                                    
+                                                    # 초단기예보와 단기예보를 통합
+                                                    all_forecasts = []
+                                                    if ultra_short:
+                                                        all_forecasts.extend(ultra_short)
+                                                    if short:
+                                                        all_forecasts.extend(short)
+                                                    
+                                                    # 현재 시간에 가장 가까운 예보 선택 (기온 데이터 필수)
+                                                    current_forecast = weather_manager._find_nearest_forecast(
+                                                        all_forecasts,
+                                                        reference_time=now,
+                                                        require_temp=True
+                                                    )
+                                                    
+                                                    # 기온이 없는 경우에도 가장 가까운 항목 선택 (fallback)
+                                                    if current_forecast is None:
+                                                        current_forecast = weather_manager._find_nearest_forecast(
+                                                            all_forecasts,
+                                                            reference_time=now,
+                                                            require_temp=False
+                                                        )
                                                 
                                                 if current_forecast:
                                                     location_name = farm_info_dict.get('road_address') or farm_info_dict.get('legal_address') or "해당 위치"
                                                     
                                                     debug_print(f"✅ 현재 기상 예보 데이터 발견: {current_forecast}")
                                                     
+                                                    # 예보 시간 정보 추가
+                                                    forecast_time_info = ""
+                                                    fcst_datetime_str = current_forecast.get("fcst_datetime", "")
+                                                    if fcst_datetime_str:
+                                                        try:
+                                                            from datetime import datetime
+                                                            fcst_time = datetime.strptime(fcst_datetime_str, "%Y%m%d%H%M")
+                                                            time_diff_hours = (fcst_time - now).total_seconds() / 3600
+                                                            
+                                                            if abs(time_diff_hours) < 0.5:
+                                                                forecast_time_info = " (현재 시간 기준)"
+                                                            elif time_diff_hours > 0:
+                                                                forecast_time_info = f" ({int(time_diff_hours)}시간 후 예보)"
+                                                            else:
+                                                                forecast_time_info = f" ({int(abs(time_diff_hours))}시간 전 예보)"
+                                                        except:
+                                                            pass
+                                                    
                                                     # 기상 데이터 표시용 포맷팅 (병해충 정보 제외)
-                                                    weather_display = f"""**위치**: {location_name}
+                                                    weather_display = f"""**위치**: {location_name}{forecast_time_info}
 
 """
                                                     if current_forecast.get("temp") is not None:
@@ -1163,25 +1197,59 @@ def create_gradio_interface():
                                     
                                     debug_print(f"📊 초단기 예보: {len(ultra_short) if ultra_short else 0}개, 단기 예보: {len(short) if short else 0}개")
                                     
+                                    # 현재 시간에 가장 가까운 예보 찾기
+                                    current_forecast = None
                                     if ultra_short or short:
-                                        for fcst in (ultra_short or []):
-                                            if fcst.get("temp") is not None:
-                                                current_forecast = fcst
-                                                break
-                                        if not current_forecast and short:
-                                            for fcst in short:
-                                                if fcst.get("temp") is not None:
-                                                    current_forecast = fcst
-                                                    break
+                                        from datetime import datetime
+                                        now = datetime.now()
+                                        
+                                        # 초단기예보와 단기예보를 통합
+                                        all_forecasts = []
+                                        if ultra_short:
+                                            all_forecasts.extend(ultra_short)
+                                        if short:
+                                            all_forecasts.extend(short)
+                                        
+                                        # 현재 시간에 가장 가까운 예보 선택 (기온 데이터 필수)
+                                        current_forecast = weather_manager._find_nearest_forecast(
+                                            all_forecasts,
+                                            reference_time=now,
+                                            require_temp=True
+                                        )
+                                        
+                                        # 기온이 없는 경우에도 가장 가까운 항목 선택 (fallback)
+                                        if current_forecast is None:
+                                            current_forecast = weather_manager._find_nearest_forecast(
+                                                all_forecasts,
+                                                reference_time=now,
+                                                require_temp=False
+                                            )
                                         
                                         if current_forecast:
                                             location_name = farm_info_dict.get('road_address') or farm_info_dict.get('legal_address') or "해당 위치"
                                             
                                             debug_print(f"✅ 현재 기상 예보 데이터 발견: {current_forecast}")
                                             
+                                            # 예보 시간 정보 추가
+                                            forecast_time_info = ""
+                                            fcst_datetime_str = current_forecast.get("fcst_datetime", "")
+                                            if fcst_datetime_str:
+                                                try:
+                                                    fcst_time = datetime.strptime(fcst_datetime_str, "%Y%m%d%H%M")
+                                                    time_diff_hours = (fcst_time - now).total_seconds() / 3600
+                                                    
+                                                    if abs(time_diff_hours) < 0.5:
+                                                        forecast_time_info = " (현재 시간 기준)"
+                                                    elif time_diff_hours > 0:
+                                                        forecast_time_info = f" ({int(time_diff_hours)}시간 후 예보)"
+                                                    else:
+                                                        forecast_time_info = f" ({int(abs(time_diff_hours))}시간 전 예보)"
+                                                except:
+                                                    pass
+                                            
                                             # 기상 데이터 표시용 포맷팅
                                             weather_display = f"""### 🌤️ 현재 기상 정보
-**위치**: {location_name}
+**위치**: {location_name}{forecast_time_info}
 
 """
                                             if current_forecast.get("temp") is not None:
