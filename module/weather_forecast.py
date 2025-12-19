@@ -449,42 +449,102 @@ class WeatherForecastManager:
                 debug_print(f"⚠️ {forecast_type}예보 데이터가 없습니다.")
                 return []
             
+            # items가 리스트가 아닌 경우 리스트로 변환
+            if not isinstance(items, list):
+                items = [items]
+                debug_print(f"📝 {forecast_type}예보 데이터를 리스트로 변환했습니다.")
+            
+            debug_print(f"📊 {forecast_type}예보 원본 데이터 {len(items)}개 항목 수신")
+            
+            # 안전한 숫자 변환 헬퍼 함수
+            def safe_float(value):
+                """안전하게 float로 변환"""
+                if value is None or value == "":
+                    return None
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return None
+            
+            def safe_int(value):
+                """안전하게 int로 변환"""
+                if value is None or value == "":
+                    return None
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    return None
+            
             # 시간별로 그룹화
             time_groups = {}
+            parsed_count = 0
+            error_count = 0
+            
             for item in items:
-                fcst_date = item.get("fcstDate", "")
-                fcst_time = item.get("fcstTime", "")
-                fcst_time_key = fcst_date + fcst_time
-                
-                if fcst_time_key not in time_groups:
-                    time_groups[fcst_time_key] = {
-                        "fcst_date": fcst_date,
-                        "fcst_time": fcst_time,
-                        "fcst_datetime": fcst_date + fcst_time
-                    }
-                
-                category = item.get("category")
-                fcst_value = item.get("fcstValue")
-                
-                if category == "TMP":  # 기온
-                    time_groups[fcst_time_key]["temp"] = float(fcst_value)
-                elif category == "TMX":  # 최고기온
-                    time_groups[fcst_time_key]["temp_max"] = float(fcst_value)
-                elif category == "TMN":  # 최저기온
-                    time_groups[fcst_time_key]["temp_min"] = float(fcst_value)
-                elif category == "REH":  # 습도
-                    time_groups[fcst_time_key]["rh"] = float(fcst_value)
-                elif category == "PCP":  # 강수량
-                    if fcst_value and fcst_value != "0" and fcst_value != "강수없음":
-                        time_groups[fcst_time_key]["precipitation"] = fcst_value
-                elif category == "WSD":  # 풍속
-                    time_groups[fcst_time_key]["wind_speed"] = float(fcst_value)
-                elif category == "VEC":  # 풍향
-                    time_groups[fcst_time_key]["wind_dir"] = float(fcst_value)
-                elif category == "SKY":  # 하늘상태
-                    sky_code = int(fcst_value)
-                    sky_map = {1: "맑음", 3: "구름많음", 4: "흐림"}
-                    time_groups[fcst_time_key]["sky_condition"] = sky_map.get(sky_code, "알 수 없음")
+                try:
+                    fcst_date = item.get("fcstDate", "")
+                    fcst_time = item.get("fcstTime", "")
+                    
+                    if not fcst_date or not fcst_time:
+                        error_count += 1
+                        continue
+                    
+                    fcst_time_key = fcst_date + fcst_time
+                    
+                    if fcst_time_key not in time_groups:
+                        time_groups[fcst_time_key] = {
+                            "fcst_date": fcst_date,
+                            "fcst_time": fcst_time,
+                            "fcst_datetime": fcst_date + fcst_time
+                        }
+                    
+                    category = item.get("category")
+                    fcst_value = item.get("fcstValue")
+                    
+                    # fcst_value가 None이거나 빈 문자열인 경우 처리
+                    if fcst_value is None or fcst_value == "":
+                        continue
+                    
+                    # 카테고리별 데이터 파싱
+                    if category == "TMP":  # 기온
+                        temp_value = safe_float(fcst_value)
+                        if temp_value is not None:
+                            time_groups[fcst_time_key]["temp"] = temp_value
+                    elif category == "TMX":  # 최고기온
+                        temp_max_value = safe_float(fcst_value)
+                        if temp_max_value is not None:
+                            time_groups[fcst_time_key]["temp_max"] = temp_max_value
+                    elif category == "TMN":  # 최저기온
+                        temp_min_value = safe_float(fcst_value)
+                        if temp_min_value is not None:
+                            time_groups[fcst_time_key]["temp_min"] = temp_min_value
+                    elif category == "REH":  # 습도
+                        rh_value = safe_float(fcst_value)
+                        if rh_value is not None:
+                            time_groups[fcst_time_key]["rh"] = rh_value
+                    elif category == "PCP":  # 강수량
+                        if fcst_value and fcst_value != "0" and fcst_value != "강수없음":
+                            time_groups[fcst_time_key]["precipitation"] = fcst_value
+                    elif category == "WSD":  # 풍속
+                        wind_speed_value = safe_float(fcst_value)
+                        if wind_speed_value is not None:
+                            time_groups[fcst_time_key]["wind_speed"] = wind_speed_value
+                    elif category == "VEC":  # 풍향
+                        wind_dir_value = safe_float(fcst_value)
+                        if wind_dir_value is not None:
+                            time_groups[fcst_time_key]["wind_dir"] = wind_dir_value
+                    elif category == "SKY":  # 하늘상태
+                        sky_code = safe_int(fcst_value)
+                        if sky_code is not None:
+                            sky_map = {1: "맑음", 3: "구름많음", 4: "흐림"}
+                            time_groups[fcst_time_key]["sky_condition"] = sky_map.get(sky_code, "알 수 없음")
+                    
+                    parsed_count += 1
+                    
+                except Exception as e:
+                    error_count += 1
+                    debug_print(f"⚠️ {forecast_type}예보 항목 파싱 오류 (category: {item.get('category', 'N/A')}, value: {item.get('fcstValue', 'N/A')}): {e}")
+                    continue
             
             # 리스트로 변환
             for fcst_time_key, data in time_groups.items():
@@ -496,10 +556,12 @@ class WeatherForecastManager:
             # 시간순 정렬
             forecast_list.sort(key=lambda x: x["fcst_datetime"])
             
-            debug_print(f"✅ {forecast_type}예보 {len(forecast_list)}개 데이터 파싱 완료")
+            debug_print(f"✅ {forecast_type}예보 파싱 완료: {len(forecast_list)}개 시간대, {parsed_count}개 항목 성공, {error_count}개 항목 오류")
             
         except Exception as e:
             debug_print(f"⚠️ 예보 데이터 파싱 오류: {e}")
+            import traceback
+            debug_print(traceback.format_exc())
         
         return forecast_list
     
@@ -523,6 +585,65 @@ class WeatherForecastManager:
             "short": self.get_short_forecast(latitude, longitude),
             "medium": self.get_medium_forecast(latitude, longitude)
         }
+    
+    def _find_nearest_forecast(
+        self,
+        forecast_list: List[Dict[str, Any]],
+        reference_time: Optional[datetime] = None,
+        require_temp: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """
+        현재 시간에 가장 가까운 예보 항목 찾기
+        
+        Args:
+            forecast_list: 예보 데이터 리스트
+            reference_time: 기준 시간 (None이면 현재 시간)
+            require_temp: 기온 데이터가 필수인지 여부
+        
+        Returns:
+            현재 시간에 가장 가까운 예보 항목
+        """
+        if not forecast_list:
+            return None
+        
+        if reference_time is None:
+            reference_time = datetime.now()
+        
+        nearest_forecast = None
+        min_time_diff = float('inf')
+        
+        for fcst in forecast_list:
+            fcst_datetime_str = fcst.get("fcst_datetime", "")
+            if not fcst_datetime_str:
+                continue
+            
+            # 기온이 필수인 경우 체크
+            if require_temp and fcst.get("temp") is None:
+                continue
+            
+            try:
+                # YYYYMMDDHHMM 형식 파싱
+                fcst_time = datetime.strptime(fcst_datetime_str, "%Y%m%d%H%M")
+                time_diff = abs((fcst_time - reference_time).total_seconds())
+                
+                # 현재 시간에 더 가까운 경우
+                if time_diff < min_time_diff:
+                    min_time_diff = time_diff
+                    nearest_forecast = fcst
+            except (ValueError, TypeError) as e:
+                debug_print(f"⚠️ 예보 시간 파싱 오류: {e}")
+                continue
+        
+        if nearest_forecast:
+            fcst_time_str = nearest_forecast.get("fcst_datetime", "")
+            try:
+                fcst_time = datetime.strptime(fcst_time_str, "%Y%m%d%H%M")
+                time_diff_hours = (fcst_time - reference_time).total_seconds() / 3600
+                debug_print(f"📅 가장 가까운 예보 선택: {fcst_time_str} (현재 시간으로부터 {time_diff_hours:.1f}시간 차이)")
+            except:
+                pass
+        
+        return nearest_forecast
     
     def get_current_weather_context(self) -> str:
         """
@@ -552,35 +673,54 @@ class WeatherForecastManager:
             if not ultra_short and not short:
                 return ""
             
-            # 기온 데이터가 있는 첫 번째 예보 찾기
+            # 현재 시간에 가장 가까운 예보 찾기
             current_forecast = None
+            now = datetime.now()
             
-            # 초단기예보에서 기온이 있는 첫 번째 항목 찾기
+            # 초단기예보와 단기예보를 통합하여 가장 가까운 항목 찾기
+            all_forecasts = []
             if ultra_short:
-                for fcst in ultra_short:
-                    if fcst.get("temp") is not None:
-                        current_forecast = fcst
-                        break
-                # 기온이 없으면 첫 번째 항목 사용
-                if current_forecast is None and ultra_short:
-                    current_forecast = ultra_short[0]
+                all_forecasts.extend(ultra_short)
+            if short:
+                all_forecasts.extend(short)
             
-            # 초단기예보에 기온이 없으면 단기예보에서 찾기
-            if current_forecast is None or current_forecast.get("temp") is None:
-                if short:
-                    for fcst in short:
-                        if fcst.get("temp") is not None:
-                            current_forecast = fcst
-                            break
-                    # 기온이 없으면 첫 번째 항목 사용
-                    if current_forecast is None and short:
-                        current_forecast = short[0]
+            # 현재 시간에 가장 가까운 예보 선택 (기온 데이터 필수)
+            current_forecast = self._find_nearest_forecast(
+                all_forecasts,
+                reference_time=now,
+                require_temp=True
+            )
+            
+            # 기온이 없는 경우에도 가장 가까운 항목 선택 (fallback)
+            if current_forecast is None:
+                current_forecast = self._find_nearest_forecast(
+                    all_forecasts,
+                    reference_time=now,
+                    require_temp=False
+                )
             
             if not current_forecast:
                 return ""
             
+            # 예보 시간 정보 추가
+            forecast_time_info = ""
+            fcst_datetime_str = current_forecast.get("fcst_datetime", "")
+            if fcst_datetime_str:
+                try:
+                    fcst_time = datetime.strptime(fcst_datetime_str, "%Y%m%d%H%M")
+                    time_diff_hours = (fcst_time - now).total_seconds() / 3600
+                    
+                    if abs(time_diff_hours) < 0.5:
+                        forecast_time_info = " (현재 시간 기준)"
+                    elif time_diff_hours > 0:
+                        forecast_time_info = f" ({int(time_diff_hours)}시간 후 예보)"
+                    else:
+                        forecast_time_info = f" ({int(abs(time_diff_hours))}시간 전 예보)"
+                except:
+                    pass
+            
             # 컨텍스트 문자열 생성 (위치 정보 포함, 예보 데이터임을 명시)
-            context_parts = [f"🌤️ 현재 기상 조건 ({location_name} 기준, 기상청 예보 데이터):"]
+            context_parts = [f"🌤️ 현재 기상 조건 ({location_name} 기준, 기상청 예보 데이터){forecast_time_info}:"]
             
             # 기온 정보를 가장 먼저 표시하고 강조
             if current_forecast.get("temp") is not None:
@@ -749,3 +889,4 @@ class WeatherForecastManager:
         
         return self.get_current_weather_context()
 
+    
